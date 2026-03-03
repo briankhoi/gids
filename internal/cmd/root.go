@@ -9,11 +9,13 @@ import (
 // get its own command instance, avoiding flag re-registration panics.
 func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:          "gids",
-		Short:        "Git Identity Swap - manage multiple Git identities",
-		SilenceUsage: true,
+		Use:           "gids",
+		Short:         "Git Identity Swap - manage multiple Git identities",
+		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+
+	root.AddCommand(newVersionCommand())
 
 	return root
 }
