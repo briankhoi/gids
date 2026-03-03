@@ -23,7 +23,7 @@ func TestHelp_ContainsUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, want := range []string{"gids", "Usage", "version", "--verbose"} {
+	for _, want := range []string{"gids", "Usage", "version", "--verbose", "profiles", "Examples"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help output missing %q\ngot: %s", want, out)
 		}
