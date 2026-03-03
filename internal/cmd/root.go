@@ -15,8 +15,22 @@ func NewRootCommand() *cobra.Command {
 	var verbose bool
 
 	root := &cobra.Command{
-		Use:           "gids",
-		Short:         "Git Identity Swap - manage multiple Git identities",
+		Use:   "gids",
+		Short: "Git Identity Swap - manage multiple Git identities",
+		Long: `gids (Git Identity Swap) manages multiple Git identities on one machine.
+Store profiles (name, email, SSH key) and map directory globs to them as rules.
+The shell hook applies the matching profile automatically when you cd.`,
+		Example: `  # Add a new identity profile
+  gids profile add
+
+  # Apply the "work" profile to the current git repo
+  gids use work
+
+  # See which profile is active and why
+  gids status
+
+  # Set up auto-switching so profiles apply when you cd
+  gids hook zsh >> ~/.zshrc`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
