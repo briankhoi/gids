@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"gids/internal/config"
+	"gids/internal/sshconfig"
 )
 
 func newProfileCmd() *cobra.Command {
@@ -24,6 +27,7 @@ func newProfileCmd() *cobra.Command {
 	cmd.AddCommand(newProfileListCmd(&cfgPath))
 	cmd.AddCommand(newProfileEditCmd(&cfgPath))
 	cmd.AddCommand(newProfileDeleteCmd(&cfgPath))
+	cmd.AddCommand(newProfileImportCmd(&cfgPath))
 	return cmd
 }
 
@@ -35,6 +39,33 @@ func printProfileTable(w io.Writer, profiles []config.Profile) {
 			p.Name, p.GitName, p.GitEmail, p.Username, p.SSHKey)
 	}
 	tw.Flush()
+}
+
+// confirmPrompt writes "<message> [Y/n]: " (or [y/N]) to w and reads a yes/no
+// answer. defaultYes controls the default on empty input and which letter is
+// uppercased. Accepts y/yes (true) or n/no (false), case-insensitive. Re-prompts
+// on unrecognized input.
+func confirmPrompt(r *bufio.Reader, w io.Writer, message string, defaultYes bool) (bool, error) {
+	opts := "[y/N]"
+	if defaultYes {
+		opts = "[Y/n]"
+	}
+	for {
+		val, err := prompt(r, w, fmt.Sprintf("%s %s: ", message, opts))
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(val) {
+		case "":
+			return defaultYes, nil
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			fmt.Fprintln(w, "Please enter y or n.")
+		}
+	}
 }
 
 // prompt writes message to w and reads a trimmed line from r.
@@ -259,11 +290,11 @@ func newProfileDeleteCmd(cfgPath *string) *cobra.Command {
 			out := cmd.OutOrStdout()
 			if !force {
 				r := bufio.NewReader(cmd.InOrStdin())
-				answer, err := prompt(r, out, fmt.Sprintf("Delete profile %q? [y/N] ", name))
+				ok, err := confirmPrompt(r, out, fmt.Sprintf("Delete profile %q?", name), false)
 				if err != nil {
 					return err
 				}
-				if strings.ToLower(answer) != "y" {
+				if !ok {
 					fmt.Fprintln(out, "Aborted.")
 					return nil
 				}
@@ -282,4 +313,248 @@ func newProfileDeleteCmd(cfgPath *string) *cobra.Command {
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation prompt")
 	return cmd
+}
+
+func newProfileImportCmd(cfgPath *string) *cobra.Command {
+	var filePath string
+	var hostFilter string
+
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import profiles from an SSH config file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			r := bufio.NewReader(cmd.InOrStdin())
+
+			// Resolve which SSH config file to use.
+			resolvedPath, err := resolveSSHConfigPath(r, out, filePath)
+			if err != nil {
+				return err
+			}
+
+			fmt.Fprintf(out, "\nParsing %s...\n\n", tildify(resolvedPath))
+			hosts, err := sshconfig.ParseFile(resolvedPath)
+			if err != nil {
+				return err
+			}
+
+			// Apply --host filter if set.
+			if hostFilter != "" {
+				var filtered []sshconfig.Host
+				lower := strings.ToLower(hostFilter)
+				for _, h := range hosts {
+					if strings.Contains(strings.ToLower(h.Pattern), lower) {
+						filtered = append(filtered, h)
+					}
+				}
+				hosts = filtered
+			}
+
+			if len(hosts) == 0 {
+				fmt.Fprintf(out, "No SSH host entries found in %s.\n", resolvedPath)
+				return nil
+			}
+
+			// Display found hosts.
+			fmt.Fprintf(out, "Found %d host entr%s:\n", len(hosts), pluralSuffix(len(hosts), "y", "ies"))
+			for i, h := range hosts {
+				fmt.Fprintf(out, "  [%d] %-20s IdentityFile: %-25s User: %s\n",
+					i+1, h.Pattern, h.IdentityFile, h.User)
+			}
+			fmt.Fprintln(out)
+
+			// Determine which hosts to import.
+			toImport, err := selectHostsToImport(r, out, hosts)
+			if err != nil {
+				return err
+			}
+			if len(toImport) == 0 {
+				fmt.Fprintln(out, "Nothing to import.")
+				return nil
+			}
+
+			// Load config once.
+			cfg, err := config.Load(*cfgPath)
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+
+			var created []config.Profile
+			var lastGitName string
+
+			for _, h := range toImport {
+				fmt.Fprintf(out, "\n--- Importing %q ---\n", h.Pattern)
+
+				// Skip if profile already exists.
+				if p, _ := cfg.FindProfile(h.Pattern); p != nil {
+					fmt.Fprintf(out, "Profile %q already exists, skipping.\n", h.Pattern)
+					continue
+				}
+
+				// Warn if no IdentityFile.
+				if h.IdentityFile == "" {
+					fmt.Fprintf(out, "No IdentityFile set for %q — SSH key will be empty.\n", h.Pattern)
+				}
+
+				// Prompt for required Git name.
+				namePrompt := "Git name (required): "
+				if lastGitName != "" {
+					namePrompt = fmt.Sprintf("Git name [%s] (Enter to reuse, or type new): ", lastGitName)
+				}
+				gitName, err := promptRequired(r, out, namePrompt, lastGitName)
+				if err != nil {
+					return err
+				}
+				lastGitName = gitName
+
+				// Prompt for required Git email.
+				gitEmail, err := promptRequired(r, out, "Git email (required): ", "")
+				if err != nil {
+					return err
+				}
+
+				p := config.Profile{
+					Name:     h.Pattern,
+					GitName:  gitName,
+					GitEmail: gitEmail,
+					Username: h.User,
+					SSHKey:   h.IdentityFile,
+				}
+				cfg.Profiles = append(cfg.Profiles, p)
+				created = append(created, p)
+				fmt.Fprintf(out, "Profile %q created.\n", h.Pattern)
+			}
+
+			if len(created) == 0 {
+				return nil
+			}
+
+			if err := config.Save(cfg, *cfgPath); err != nil {
+				return fmt.Errorf("saving config: %w", err)
+			}
+
+			fmt.Fprintf(out, "\nCreated %d profile(s):\n", len(created))
+			printProfileTable(out, created)
+
+			fmt.Fprintln(out, "\nTo modify a profile, run:")
+			for _, p := range created {
+				fmt.Fprintf(out, "  gids profile edit %q\n", p.Name)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&filePath, "file", "", "SSH config file to import from (skips discovery)")
+	cmd.Flags().StringVar(&hostFilter, "host", "", "import only hosts whose pattern contains this string (case-insensitive)")
+	return cmd
+}
+
+// resolveSSHConfigPath returns the SSH config path to use. If filePath is set,
+// it's used directly. Otherwise, the user is prompted to pick from known paths.
+func resolveSSHConfigPath(r *bufio.Reader, w io.Writer, filePath string) (string, error) {
+	if filePath != "" {
+		return filePath, nil
+	}
+
+	candidates := sshconfig.DefaultConfigPaths()
+	fmt.Fprintln(w, "Known SSH config locations:")
+	for i, p := range candidates {
+		status := "not found"
+		if _, err := os.Stat(p); err == nil {
+			status = "found"
+		}
+		fmt.Fprintf(w, "  [%d] %-35s (%s)\n", i+1, tildify(p), status)
+	}
+	fmt.Fprintln(w, "  [0] Enter a custom path")
+	fmt.Fprintln(w)
+
+	// Build prompt showing the full valid range, e.g. "Enter 0–2 [default: 1]: "
+	max := len(candidates)
+	for {
+		val, err := prompt(r, w, fmt.Sprintf("Enter 0-%d [default: 1]: ", max))
+		if err != nil {
+			return "", err
+		}
+		if val == "" {
+			val = "1"
+		}
+
+		if val == "0" {
+			customPath, err := prompt(r, w, "SSH config path: ")
+			if err != nil {
+				return "", err
+			}
+			return customPath, nil
+		}
+
+		// Validate and map to a candidate.
+		if len(val) == 1 && val[0] >= '1' && int(val[0]-'0') <= max {
+			return candidates[int(val[0]-'0')-1], nil
+		}
+		fmt.Fprintf(w, "Please enter a number between 0 and %d.\n", max)
+	}
+}
+
+// selectHostsToImport asks the user which hosts to import, returning the selection.
+func selectHostsToImport(r *bufio.Reader, w io.Writer, hosts []sshconfig.Host) ([]sshconfig.Host, error) {
+	all, err := confirmPrompt(r, w, "Import all?", true)
+	if err != nil {
+		return nil, err
+	}
+	if all {
+		return hosts, nil
+	}
+
+	var selected []sshconfig.Host
+	for _, h := range hosts {
+		ok, err := confirmPrompt(r, w, fmt.Sprintf("Import %q?", h.Pattern), false)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			selected = append(selected, h)
+		}
+	}
+	return selected, nil
+}
+
+// promptRequired prompts repeatedly until a non-empty value is entered.
+// If defaultVal is non-empty, an empty input returns defaultVal.
+func promptRequired(r *bufio.Reader, w io.Writer, message, defaultVal string) (string, error) {
+	for {
+		val, err := prompt(r, w, message)
+		if err != nil {
+			return "", err
+		}
+		if val == "" && defaultVal != "" {
+			return defaultVal, nil
+		}
+		if val != "" {
+			return val, nil
+		}
+		fmt.Fprintln(w, "This field is required.")
+	}
+}
+
+// tildify replaces the home directory prefix with ~.
+func tildify(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if strings.HasPrefix(path, home+string(filepath.Separator)) {
+		return "~" + path[len(home):]
+	}
+	if path == home {
+		return "~"
+	}
+	return path
+}
+
+// pluralSuffix returns singular if n==1, plural otherwise.
+func pluralSuffix(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
 }
