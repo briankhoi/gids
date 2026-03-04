@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"text/tabwriter"
 
@@ -13,8 +12,20 @@ import (
 	"gids/internal/config"
 )
 
-// configPath is used by profile sub-commands; overridable in tests.
-var configPath string
+func newProfileCmd() *cobra.Command {
+	var cfgPath string
+
+	cmd := &cobra.Command{
+		Use:   "profile",
+		Short: "Manage Git identity profiles",
+	}
+	cmd.PersistentFlags().StringVar(&cfgPath, "config", "", "path to config file (default: $UserConfigDir/gids/config.yaml)")
+	cmd.AddCommand(newProfileAddCmd(&cfgPath))
+	cmd.AddCommand(newProfileListCmd(&cfgPath))
+	cmd.AddCommand(newProfileEditCmd(&cfgPath))
+	cmd.AddCommand(newProfileDeleteCmd(&cfgPath))
+	return cmd
+}
 
 func printProfileTable(w io.Writer, profiles []config.Profile) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -26,42 +37,53 @@ func printProfileTable(w io.Writer, profiles []config.Profile) {
 	tw.Flush()
 }
 
-func newProfileCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "profile",
-		Short: "Manage Git identity profiles",
-	}
-	cmd.PersistentFlags().StringVar(&configPath, "config", "", "path to config file (default: $UserConfigDir/gids/config.yaml)")
-	cmd.AddCommand(newProfileAddCmd())
-	cmd.AddCommand(newProfileListCmd())
-	cmd.AddCommand(newProfileEditCmd())
-	cmd.AddCommand(newProfileDeleteCmd())
-	return cmd
-}
-
-// prompt prints a message and reads a trimmed line from stdin.
-func prompt(reader *bufio.Reader, message string) (string, error) {
-	fmt.Fprint(os.Stdout, message)
-	line, err := reader.ReadString('\n')
+// prompt writes message to w and reads a trimmed line from r.
+func prompt(r *bufio.Reader, w io.Writer, message string) (string, error) {
+	fmt.Fprint(w, message)
+	line, err := r.ReadString('\n')
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
 }
 
-func newProfileAddCmd() *cobra.Command {
+// promptOptional prompts for an optional field with keep/clear semantics:
+// empty input keeps current; "none" clears it.
+func promptOptional(r *bufio.Reader, w io.Writer, label, current string) (string, error) {
+	val, err := prompt(r, w, fmt.Sprintf("%s [%s] (Enter to keep, \"none\" to clear): ", label, current))
+	if err != nil {
+		return "", err
+	}
+	switch val {
+	case "none":
+		return "", nil
+	case "":
+		return current, nil
+	default:
+		return val, nil
+	}
+}
+
+func warnNoAuth(w io.Writer, username, sshKey, signingKey string) {
+	if username == "" && sshKey == "" && signingKey == "" {
+		fmt.Fprintln(w, "No auth method set - push/pull will use your system default.")
+	}
+}
+
+func newProfileAddCmd(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "add",
 		Short: "Add a new identity profile",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(configPath)
+			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
 			}
 
-			reader := bufio.NewReader(os.Stdin)
+			out := cmd.OutOrStdout()
+			r := bufio.NewReader(cmd.InOrStdin())
 
-			name, err := prompt(reader, "Profile name (e.g. Work, Personal): ")
+			name, err := prompt(r, out, "Profile name (e.g. Work, Personal): ")
 			if err != nil {
 				return err
 			}
@@ -72,7 +94,7 @@ func newProfileAddCmd() *cobra.Command {
 				return fmt.Errorf("profile %q already exists", name)
 			}
 
-			gitName, err := prompt(reader, "Git name: ")
+			gitName, err := prompt(r, out, "Git name: ")
 			if err != nil {
 				return err
 			}
@@ -80,7 +102,7 @@ func newProfileAddCmd() *cobra.Command {
 				return fmt.Errorf("git name is required")
 			}
 
-			gitEmail, err := prompt(reader, "Git email: ")
+			gitEmail, err := prompt(r, out, "Git email: ")
 			if err != nil {
 				return err
 			}
@@ -88,73 +110,72 @@ func newProfileAddCmd() *cobra.Command {
 				return fmt.Errorf("git email is required")
 			}
 
-			username, err := prompt(reader, "Username (optional, for HTTPS — sets credential.username, Enter to skip): ")
+			username, err := prompt(r, out, "Username (optional, for HTTPS — sets credential.username, Enter to skip): ")
 			if err != nil {
 				return err
 			}
 
-			sshKey, err := prompt(reader, "SSH key path (optional, e.g. ~/.ssh/id_work, Enter to skip): ")
+			sshKey, err := prompt(r, out, "SSH key path (optional, e.g. ~/.ssh/id_work, Enter to skip): ")
 			if err != nil {
 				return err
 			}
 
-			signingKey, err := prompt(reader, "Signing key (optional, GPG fingerprint or SSH key path, Enter to skip): ")
+			signingKey, err := prompt(r, out, "Signing key (optional, GPG fingerprint or SSH key path, Enter to skip): ")
 			if err != nil {
 				return err
 			}
 
-			if username == "" && sshKey == "" && signingKey == "" {
-				fmt.Fprintln(os.Stdout, "No auth method set — push/pull will use your system default.")
-			}
+			warnNoAuth(out, username, sshKey, signingKey)
 
 			cfg.Profiles = append(cfg.Profiles, config.Profile{
-				Name:       name,
-				GitName:    gitName,
-				GitEmail:   gitEmail,
-				Username:   username,
-				SSHKey:     sshKey,
-				SigningKey:  signingKey,
+				Name:      name,
+				GitName:   gitName,
+				GitEmail:  gitEmail,
+				Username:  username,
+				SSHKey:    sshKey,
+				SigningKey: signingKey,
 			})
 
-			if err := config.Save(cfg, configPath); err != nil {
+			if err := config.Save(cfg, *cfgPath); err != nil {
 				return fmt.Errorf("saving config: %w", err)
 			}
 
-			fmt.Fprintf(os.Stdout, "Profile %q added.\n", name)
+			fmt.Fprintf(out, "Profile %q added.\n", name)
 			return nil
 		},
 	}
 }
 
-func newProfileListCmd() *cobra.Command {
+func newProfileListCmd(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List all identity profiles",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(configPath)
+			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
 			}
 
+			out := cmd.OutOrStdout()
 			if len(cfg.Profiles) == 0 {
-				fmt.Fprintln(os.Stdout, "No profiles found. Run 'gids profile add' to create one.")
+				fmt.Fprintln(out, "No profiles found. Run 'gids profile add' to create one.")
 				return nil
 			}
 
-			printProfileTable(os.Stdout, cfg.Profiles)
+			printProfileTable(out, cfg.Profiles)
 			return nil
 		},
 	}
 }
 
-func newProfileEditCmd() *cobra.Command {
+func newProfileEditCmd(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "edit <name>",
 		Short: "Edit an existing identity profile",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			cfg, err := config.Load(configPath)
+			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
 			}
@@ -164,9 +185,10 @@ func newProfileEditCmd() *cobra.Command {
 				return fmt.Errorf("profile %q not found", name)
 			}
 
-			reader := bufio.NewReader(os.Stdin)
+			out := cmd.OutOrStdout()
+			r := bufio.NewReader(cmd.InOrStdin())
 
-			gitName, err := prompt(reader, fmt.Sprintf("Git name [%s]: ", p.GitName))
+			gitName, err := prompt(r, out, fmt.Sprintf("Git name [%s]: ", p.GitName))
 			if err != nil {
 				return err
 			}
@@ -174,7 +196,7 @@ func newProfileEditCmd() *cobra.Command {
 				gitName = p.GitName
 			}
 
-			gitEmail, err := prompt(reader, fmt.Sprintf("Git email [%s]: ", p.GitEmail))
+			gitEmail, err := prompt(r, out, fmt.Sprintf("Git email [%s]: ", p.GitEmail))
 			if err != nil {
 				return err
 			}
@@ -182,42 +204,22 @@ func newProfileEditCmd() *cobra.Command {
 				gitEmail = p.GitEmail
 			}
 
-			username, err := prompt(reader, fmt.Sprintf("Username [%s] (Enter to keep, \"none\" to clear): ", p.Username))
+			username, err := promptOptional(r, out, "Username", p.Username)
 			if err != nil {
 				return err
 			}
-			switch username {
-			case "none":
-				username = ""
-			case "":
-				username = p.Username
-			}
 
-			sshKey, err := prompt(reader, fmt.Sprintf("SSH key path [%s] (Enter to keep, \"none\" to clear): ", p.SSHKey))
+			sshKey, err := promptOptional(r, out, "SSH key path", p.SSHKey)
 			if err != nil {
 				return err
 			}
-			switch sshKey {
-			case "none":
-				sshKey = ""
-			case "":
-				sshKey = p.SSHKey
-			}
 
-			signingKey, err := prompt(reader, fmt.Sprintf("Signing key [%s] (Enter to keep, \"none\" to clear): ", p.SigningKey))
+			signingKey, err := promptOptional(r, out, "Signing key", p.SigningKey)
 			if err != nil {
 				return err
 			}
-			switch signingKey {
-			case "none":
-				signingKey = ""
-			case "":
-				signingKey = p.SigningKey
-			}
 
-			if username == "" && sshKey == "" && signingKey == "" {
-				fmt.Fprintln(os.Stdout, "No auth method set — push/pull will use your system default.")
-			}
+			warnNoAuth(out, username, sshKey, signingKey)
 
 			p.GitName = gitName
 			p.GitEmail = gitEmail
@@ -225,17 +227,17 @@ func newProfileEditCmd() *cobra.Command {
 			p.SSHKey = sshKey
 			p.SigningKey = signingKey
 
-			if err := config.Save(cfg, configPath); err != nil {
+			if err := config.Save(cfg, *cfgPath); err != nil {
 				return fmt.Errorf("saving config: %w", err)
 			}
 
-			fmt.Fprintf(os.Stdout, "Profile %q updated.\n", name)
+			fmt.Fprintf(out, "Profile %q updated.\n", name)
 			return nil
 		},
 	}
 }
 
-func newProfileDeleteCmd() *cobra.Command {
+func newProfileDeleteCmd(cfgPath *string) *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
@@ -245,7 +247,7 @@ func newProfileDeleteCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			cfg, err := config.Load(configPath)
+			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
 			}
@@ -254,25 +256,26 @@ func newProfileDeleteCmd() *cobra.Command {
 				return fmt.Errorf("profile %q not found", name)
 			}
 
+			out := cmd.OutOrStdout()
 			if !force {
-				reader := bufio.NewReader(os.Stdin)
-				answer, err := prompt(reader, fmt.Sprintf("Delete profile %q? [y/N] ", name))
+				r := bufio.NewReader(cmd.InOrStdin())
+				answer, err := prompt(r, out, fmt.Sprintf("Delete profile %q? [y/N] ", name))
 				if err != nil {
 					return err
 				}
 				if strings.ToLower(answer) != "y" {
-					fmt.Fprintln(os.Stdout, "Aborted.")
+					fmt.Fprintln(out, "Aborted.")
 					return nil
 				}
 			}
 
 			cfg.DeleteProfile(name)
 
-			if err := config.Save(cfg, configPath); err != nil {
+			if err := config.Save(cfg, *cfgPath); err != nil {
 				return fmt.Errorf("saving config: %w", err)
 			}
 
-			fmt.Fprintf(os.Stdout, "Profile %q deleted.\n", name)
+			fmt.Fprintf(out, "Profile %q deleted.\n", name)
 			return nil
 		},
 	}

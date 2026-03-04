@@ -12,6 +12,9 @@ build:
 test:
 	go test ./...
 
+test-verbose:
+	go test -v ./...
+
 vet:
 	go vet ./...
 
