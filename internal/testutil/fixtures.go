@@ -12,5 +12,11 @@ const (
 
 	Username   = "alice"
 	SSHKey     = "~/.ssh/id_example"
+	SSHKey2    = "~/.ssh/id_personal"
 	SigningKey  = "ABCDEF1234567890"
+
+	SSHHostWork     = "work-server"
+	SSHHostPersonal = "personal-vps"
+	SSHHostSchool   = "school-server"
+	SSHUser         = "git"
 )
