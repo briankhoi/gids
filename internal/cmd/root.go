@@ -43,6 +43,7 @@ The shell hook applies the matching profile automatically when you cd.`,
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 
 	root.AddCommand(newVersionCommand())
+	root.AddCommand(newProfileCmd())
 
 	return root
 }
