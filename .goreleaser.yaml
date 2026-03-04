@@ -1,0 +1,73 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      # Strips symbols (-s -w) for smaller release binary
+      - -s -w
+      # Version injection via -X flag ({{.Version}} populated from git tag)
+      - -X gids/internal/version.Version={{.Version}}
+    binary: gids
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+
+release:
+  github:
+    owner: "{{ .Env.GITHUB_REPOSITORY_OWNER }}"
+    name: "{{ .ProjectName }}"
+  draft: false
+  prerelease: auto
+  make_latest: true
+  mode: replace
+  header: |
+    ## Release {{.Version}}
+
+    Install with:
+    ```bash
+    # macOS/Linux
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/{{ .ProjectName }}_{{.Version}}_{{.Os}}_{{.Arch}}.tar.gz | tar xz
+    
+    # Or download binaries directly from assets below
+    ```
+  footer: |
+    **Full Changelog**: https://github.com/{{ .Env.GITHUB_REPOSITORY }}/compare/{{.PreviousTag}}...{{.Tag}}
+

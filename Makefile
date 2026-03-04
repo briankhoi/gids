@@ -1,37 +1,46 @@
 VERSION ?= dev
-LDFLAGS  := -ldflags "-X gids/internal/version.Version=$(VERSION)"
-BINARY   := bin/gids
+BINARY  := gids
+DIST    := dist
 
-PLATFORMS := linux/amd64 darwin/amd64 darwin/arm64 windows/amd64
+LDFLAGS_BASE := -X gids/internal/version.Version=$(VERSION)
+LDFLAGS_DEV  := -ldflags "$(LDFLAGS_BASE)"
 
-.PHONY: build test vet run clean build-all install
+.PHONY: build test test-coverage coverage-html coverage-terminal vet run snapshot clean
 
 build:
-	go build $(LDFLAGS) -o $(BINARY) .
+	@mkdir -p bin
+	go build $(LDFLAGS_DEV) -o bin/$(BINARY) .
+
+# test release builds locally 
+snapshot:
+	goreleaser build --snapshot --clean --single-target
+
+run:
+	go run $(LDFLAGS_DEV) . $(ARGS)
 
 test:
 	go test ./...
 
-test-verbose:
-	go test -v ./...
-
 vet:
 	go vet ./...
 
-run:
-	go run $(LDFLAGS) . $(ARGS)
+test-coverage:
+	@mkdir -p coverage
+	go test -v -coverprofile=coverage/coverage.out ./...
+
+coverage-html:
+	@if [ ! -f coverage/coverage.out ]; then \
+		echo "Generating coverage..."; \
+		$(MAKE) test-coverage; \
+	fi
+	go tool cover -html=coverage/coverage.out
+
+coverage-terminal:
+	@if [ ! -f coverage/coverage.out ]; then \
+		echo "Generating coverage..."; \
+		$(MAKE) test-coverage; \
+	fi
+	@go tool cover -func=coverage/coverage.out
 
 clean:
-	rm -rf bin/
-
-build-all:
-	@for platform in $(PLATFORMS); do \
-		GOOS=$${platform%/*} GOARCH=$${platform#*/} ; \
-		out=$(BINARY)-$${platform%/*}-$${platform#*/} ; \
-		if [ "$${platform%/*}" = "windows" ]; then out=$$out.exe ; fi ; \
-		echo "Building $$out" ; \
-		GOOS=$${platform%/*} GOARCH=$${platform#*/} go build $(LDFLAGS) -o $$out . ; \
-	done
-
-install:
-	go install $(LDFLAGS) .
+	rm -rf bin/ coverage/ $(DIST)/
