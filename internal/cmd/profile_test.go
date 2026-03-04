@@ -3,6 +3,7 @@ package cmd_test
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -268,5 +269,211 @@ func TestProfileDelete_NotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found', got: %v", err)
+	}
+}
+
+// --- profile import ---
+
+// writeSSHConfig creates a temporary SSH config file and returns its path.
+func writeSSHConfig(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ssh_config")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writeSSHConfig: %v", err)
+	}
+	return path
+}
+
+// twoHostSSHConfig returns an SSH config with work and personal host entries.
+func twoHostSSHConfig() string {
+	return fmt.Sprintf(`Host %s
+  HostName work.example.com
+  User %s
+  IdentityFile %s
+
+Host %s
+  HostName personal.example.com
+  User %s
+  IdentityFile %s
+`,
+		testutil.SSHHostWork, testutil.SSHUser, testutil.SSHKey,
+		testutil.SSHHostPersonal, testutil.SSHUser, testutil.SSHKey2,
+	)
+}
+
+func TestProfileImport_AllHosts(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	sshPath := writeSSHConfig(t, twoHostSSHConfig())
+
+	// Import all: "Y\n" for "Import all?", then name+email for each host.
+	input := fmt.Sprintf("Y\n%s\n%s\n%s\n%s\n",
+		testutil.GitName, testutil.GitEmail,
+		testutil.GitName, testutil.GitEmail2,
+	)
+	out, err := executeWithInput(input, "profile", "import", "--file", sshPath, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\noutput: %s", err, out)
+	}
+
+	for _, want := range []string{
+		testutil.SSHHostWork, testutil.SSHHostPersonal,
+		testutil.GitEmail, testutil.GitEmail2,
+		"Created 2 profile(s)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, out)
+		}
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Profiles) != 2 {
+		t.Errorf("expected 2 profiles, got %d", len(cfg.Profiles))
+	}
+	p, _ := cfg.FindProfile(testutil.SSHHostWork)
+	if p == nil {
+		t.Fatal("work-server profile not found")
+	}
+	if p.SSHKey != testutil.SSHKey {
+		t.Errorf("SSHKey = %q, want %q", p.SSHKey, testutil.SSHKey)
+	}
+	if p.Username != testutil.SSHUser {
+		t.Errorf("Username = %q, want %q", p.Username, testutil.SSHUser)
+	}
+}
+
+func TestProfileImport_SelectiveImport(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	sshPath := writeSSHConfig(t, twoHostSSHConfig())
+
+	// Choose selective: "n" for import all, "y" for work, "n" for personal,
+	// then git name+email for the one selected host.
+	input := fmt.Sprintf("n\ny\nn\n%s\n%s\n",
+		testutil.GitName, testutil.GitEmail,
+	)
+	out, err := executeWithInput(input, "profile", "import", "--file", sshPath, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\noutput: %s", err, out)
+	}
+
+	if !strings.Contains(out, "Created 1 profile(s)") {
+		t.Errorf("expected 'Created 1 profile(s)', got:\n%s", out)
+	}
+
+	cfg, _ := config.Load(cfgPath)
+	if len(cfg.Profiles) != 1 {
+		t.Errorf("expected 1 profile, got %d", len(cfg.Profiles))
+	}
+}
+
+func TestProfileImport_HostFilter(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	sshPath := writeSSHConfig(t, twoHostSSHConfig())
+
+	// --host work filters to only work-server; import all of that filtered set.
+	input := fmt.Sprintf("Y\n%s\n%s\n", testutil.GitName, testutil.GitEmail)
+	out, err := executeWithInput(input, "profile", "import",
+		"--file", sshPath, "--host", "work", "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\noutput: %s", err, out)
+	}
+
+	if !strings.Contains(out, testutil.SSHHostWork) {
+		t.Errorf("expected %q in output, got:\n%s", testutil.SSHHostWork, out)
+	}
+	if strings.Contains(out, testutil.SSHHostPersonal) {
+		t.Errorf("did not expect %q (filtered out), got:\n%s", testutil.SSHHostPersonal, out)
+	}
+
+	cfg, _ := config.Load(cfgPath)
+	if len(cfg.Profiles) != 1 {
+		t.Errorf("expected 1 profile after filter, got %d", len(cfg.Profiles))
+	}
+}
+
+func TestProfileImport_SkipDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, []config.Profile{
+		{Name: testutil.SSHHostWork, GitName: testutil.GitName, GitEmail: testutil.GitEmail},
+	})
+	sshPath := writeSSHConfig(t, twoHostSSHConfig())
+
+	// Import all; work-server already exists, personal-vps should be created.
+	input := fmt.Sprintf("Y\n%s\n%s\n", testutil.GitName, testutil.GitEmail2)
+	out, err := executeWithInput(input, "profile", "import", "--file", sshPath, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\noutput: %s", err, out)
+	}
+
+	if !strings.Contains(out, "already exists, skipping") {
+		t.Errorf("expected 'already exists, skipping' warning, got:\n%s", out)
+	}
+
+	cfg, _ := config.Load(cfgPath)
+	if len(cfg.Profiles) != 2 {
+		t.Errorf("expected 2 profiles total, got %d", len(cfg.Profiles))
+	}
+}
+
+func TestProfileImport_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	_, err := executeWithInput("", "profile", "import", "--file", "/nonexistent/ssh/config", "--config", cfgPath)
+	if err == nil {
+		t.Fatal("expected error for missing SSH config file")
+	}
+	if !strings.Contains(err.Error(), "cannot open SSH config") {
+		t.Errorf("expected 'cannot open SSH config' error, got: %v", err)
+	}
+}
+
+func TestProfileImport_NoHostsFound(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	// Only wildcard — no concrete hosts.
+	sshPath := writeSSHConfig(t, "Host *\n  ServerAliveInterval 60\n")
+
+	out, err := executeWithInput("", "profile", "import", "--file", sshPath, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "No SSH host entries found") {
+		t.Errorf("expected 'No SSH host entries found', got:\n%s", out)
+	}
+}
+
+func TestProfileImport_GitNameReuse(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	sshPath := writeSSHConfig(t, twoHostSSHConfig())
+
+	// Import all; provide name for first host, then press Enter to reuse for second.
+	input := fmt.Sprintf("Y\n%s\n%s\n\n%s\n",
+		testutil.GitName, testutil.GitEmail, testutil.GitEmail2,
+	)
+	out, err := executeWithInput(input, "profile", "import", "--file", sshPath, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\noutput: %s", err, out)
+	}
+
+	// Second host should show the "Enter to reuse" prompt.
+	if !strings.Contains(out, "Enter to reuse") {
+		t.Errorf("expected 'Enter to reuse' prompt for second host, got:\n%s", out)
+	}
+
+	cfg, _ := config.Load(cfgPath)
+	p, _ := cfg.FindProfile(testutil.SSHHostPersonal)
+	if p == nil {
+		t.Fatal("personal-vps profile not found")
+	}
+	if p.GitName != testutil.GitName {
+		t.Errorf("GitName = %q, want %q (reused)", p.GitName, testutil.GitName)
 	}
 }
