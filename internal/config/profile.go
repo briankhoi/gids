@@ -1,5 +1,10 @@
 package config
 
+import (
+	"errors"
+	"strings"
+)
+
 // Profile represents a single Git identity.
 type Profile struct {
 	Name       string `yaml:"name"`                  // display name, e.g. "Work"
@@ -8,6 +13,17 @@ type Profile struct {
 	Username   string `yaml:"username,omitempty"`    // Git username - sets credential.username (HTTPS disambiguation, no secret stored)
 	SSHKey     string `yaml:"ssh_key,omitempty"`     // path to SSH key - sets core.sshCommand
 	SigningKey string `yaml:"signing_key,omitempty"` // GPG key fingerprint or SSH key path for commit signing
+}
+
+// Validate returns an error if required fields are missing.
+func (p Profile) Validate() error {
+	if strings.TrimSpace(p.GitName) == "" {
+		return errors.New("profile git_name is required")
+	}
+	if strings.TrimSpace(p.GitEmail) == "" {
+		return errors.New("profile git_email is required")
+	}
+	return nil
 }
 
 // gids stores zero secret material — only references, paths, and usernames.

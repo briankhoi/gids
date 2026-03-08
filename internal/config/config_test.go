@@ -133,6 +133,36 @@ func TestFindProfile(t *testing.T) {
 	}
 }
 
+// --- Profile.Validate ---
+
+func TestValidate_ValidProfile(t *testing.T) {
+	p := Profile{Name: testutil.ProfileName, GitName: testutil.GitName, GitEmail: testutil.GitEmail}
+	if err := p.Validate(); err != nil {
+		t.Errorf("expected no error for valid profile, got: %v", err)
+	}
+}
+
+func TestValidate_EmptyGitName(t *testing.T) {
+	p := Profile{Name: testutil.ProfileName, GitName: "", GitEmail: testutil.GitEmail}
+	if err := p.Validate(); err == nil {
+		t.Error("expected error for empty GitName, got nil")
+	}
+}
+
+func TestValidate_WhitespaceGitName(t *testing.T) {
+	p := Profile{Name: testutil.ProfileName, GitName: "   ", GitEmail: testutil.GitEmail}
+	if err := p.Validate(); err == nil {
+		t.Error("expected error for whitespace-only GitName, got nil")
+	}
+}
+
+func TestValidate_EmptyGitEmail(t *testing.T) {
+	p := Profile{Name: testutil.ProfileName, GitName: testutil.GitName, GitEmail: ""}
+	if err := p.Validate(); err == nil {
+		t.Error("expected error for empty GitEmail, got nil")
+	}
+}
+
 func TestDeleteProfile(t *testing.T) {
 	cfg := &AppConfig{
 		Profiles: []Profile{
