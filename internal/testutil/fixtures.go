@@ -17,6 +17,5 @@ const (
 
 	SSHHostWork     = "work-server"
 	SSHHostPersonal = "personal-vps"
-	SSHHostSchool   = "school-server"
 	SSHUser         = "git"
 )
