@@ -158,7 +158,7 @@ func newProfileEditCmd(cfgPath *string) *cobra.Command {
 				return fmt.Errorf("loading config: %w", err)
 			}
 
-			p, _ := cfg.FindProfile(name)
+			p, idx := cfg.FindProfile(name)
 			if p == nil {
 				return fmt.Errorf("profile %q not found", name)
 			}
@@ -193,11 +193,7 @@ func newProfileEditCmd(cfgPath *string) *cobra.Command {
 
 			warnNoAuth(out, username, sshKey, signingKey)
 
-			p.GitName = gitName
-			p.GitEmail = gitEmail
-			p.Username = username
-			p.SSHKey = sshKey
-			p.SigningKey = signingKey
+			cfg.Profiles[idx] = editedProfile(*p, gitName, gitEmail, username, sshKey, signingKey)
 
 			if err := config.Save(cfg, *cfgPath); err != nil {
 				return fmt.Errorf("saving config: %w", err)
@@ -472,6 +468,19 @@ func tildify(path string) string {
 		return "~"
 	}
 	return path
+}
+
+// editedProfile returns a new Profile with the provided field values applied to
+// base. The Name field is preserved; no fields of base are mutated.
+func editedProfile(base config.Profile, gitName, gitEmail, username, sshKey, signingKey string) config.Profile {
+	return config.Profile{
+		Name:       base.Name,
+		GitName:    gitName,
+		GitEmail:   gitEmail,
+		Username:   username,
+		SSHKey:     sshKey,
+		SigningKey:  signingKey,
+	}
 }
 
 // pluralSuffix returns singular if n==1, plural otherwise.
