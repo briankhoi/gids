@@ -79,6 +79,46 @@ Host ` + testutil.SSHHostWork + `
 	}
 }
 
+// TestParseFile_SkipsQuestionMarkWildcard verifies that ? patterns are also
+// treated as wildcards and skipped, not just * patterns.
+func TestParseFile_SkipsQuestionMarkWildcard(t *testing.T) {
+	content := `Host host?.example.com
+  ServerAliveInterval 60
+
+Host ` + testutil.SSHHostWork + `
+  IdentityFile ` + testutil.SSHKey + `
+`
+	path := writeTempConfig(t, content)
+
+	hosts, err := sshconfig.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("expected 1 host (? wildcard skipped), got %d: %+v", len(hosts), hosts)
+	}
+	if hosts[0].Pattern != testutil.SSHHostWork {
+		t.Errorf("hosts[0].Pattern = %q, want %q", hosts[0].Pattern, testutil.SSHHostWork)
+	}
+}
+
+// TestDefaultConfigPaths_ReturnsAbsolutePaths verifies that DefaultConfigPaths
+// returns only absolute paths and no error under normal conditions.
+func TestDefaultConfigPaths_ReturnsAbsolutePaths(t *testing.T) {
+	paths, err := sshconfig.DefaultConfigPaths()
+	if err != nil {
+		t.Fatalf("DefaultConfigPaths: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("expected at least one candidate path")
+	}
+	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			t.Errorf("path %q is not absolute", p)
+		}
+	}
+}
+
 func TestParseFile_FirstIdentityFileWins(t *testing.T) {
 	content := `Host ` + testutil.SSHHostWork + `
   IdentityFile ` + testutil.SSHKey + `

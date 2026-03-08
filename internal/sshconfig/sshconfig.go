@@ -22,20 +22,23 @@ type Host struct {
 
 // DefaultConfigPaths returns candidate SSH config file paths for the current
 // platform in priority order. Paths are not guaranteed to exist.
-func DefaultConfigPaths() []string {
+func DefaultConfigPaths() ([]string, error) {
 	if runtime.GOOS == "windows" {
 		userProfile := os.Getenv("USERPROFILE")
 		programData := os.Getenv("ProgramData")
 		return []string{
 			filepath.Join(userProfile, ".ssh", "config"),
 			filepath.Join(programData, "ssh", "ssh_config"),
-		}
+		}, nil
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolving home directory: %w", err)
+	}
 	return []string{
 		filepath.Join(home, ".ssh", "config"),
 		"/etc/ssh/ssh_config",
-	}
+	}, nil
 }
 
 // ParseFile reads the SSH config at path and returns one Host per non-wildcard
