@@ -393,7 +393,10 @@ func resolveSSHConfigPath(r *bufio.Reader, w io.Writer, filePath string) (string
 		return filePath, nil
 	}
 
-	candidates := sshconfig.DefaultConfigPaths()
+	candidates, err := sshconfig.DefaultConfigPaths()
+	if err != nil {
+		return "", fmt.Errorf("resolving SSH config paths: %w", err)
+	}
 	fmt.Fprintln(w, "Known SSH config locations:")
 	for i, p := range candidates {
 		status := "not found"
