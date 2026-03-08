@@ -2,6 +2,8 @@ package git
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"gids/internal/config"
@@ -21,7 +23,11 @@ func Apply(c *Client, p config.Profile) error {
 		return fmt.Errorf("setting user.email: %w", err)
 	}
 
-	if err := setOrUnset(c, "core.sshCommand", sshCommand(p.SSHKey)); err != nil {
+	sshKey, err := expandHome(p.SSHKey)
+	if err != nil {
+		return fmt.Errorf("expanding SSH key path: %w", err)
+	}
+	if err := setOrUnset(c, "core.sshCommand", sshCommand(sshKey)); err != nil {
 		return err
 	}
 	if err := setOrUnset(c, "credential.username", p.Username); err != nil {
@@ -46,6 +52,22 @@ func setOrUnset(c *Client, key, value string) error {
 		return fmt.Errorf("unsetting %s: %w", key, err)
 	}
 	return nil
+}
+
+// expandHome replaces a leading ~ with the current user's home directory.
+// Paths that do not begin with ~ are returned unchanged.
+func expandHome(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
 }
 
 // sshCommand returns the core.sshCommand value for a given key path, or ""
