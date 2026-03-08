@@ -35,10 +35,11 @@ func confirmPrompt(r *bufio.Reader, w io.Writer, message string, defaultYes bool
 }
 
 // prompt writes message to w and reads a trimmed line from r.
+// io.EOF with data (final line without trailing newline) is treated as success.
 func prompt(r *bufio.Reader, w io.Writer, message string) (string, error) {
 	fmt.Fprint(w, message)
 	line, err := r.ReadString('\n')
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
