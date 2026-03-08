@@ -86,6 +86,9 @@ func (c *AppConfig) DeleteProfile(name string) bool {
 	if idx == -1 {
 		return false
 	}
-	c.Profiles = append(c.Profiles[:idx], c.Profiles[idx+1:]...)
+	next := make([]Profile, 0, len(c.Profiles)-1)
+	next = append(next, c.Profiles[:idx]...)
+	next = append(next, c.Profiles[idx+1:]...)
+	c.Profiles = next
 	return true
 }
