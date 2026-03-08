@@ -184,3 +184,71 @@ func TestDeleteProfile(t *testing.T) {
 		t.Fatal("expected false when deleting non-existent profile")
 	}
 }
+
+// TestDeleteProfile_DoesNotCorruptOriginalBacking verifies that DeleteProfile
+// builds a new slice rather than mutating the original backing array. The
+// append(a[:i], a[i+1:]...) idiom overwrites elements in the original array,
+// corrupting any other slice that shares the same backing storage.
+func TestDeleteProfile_DoesNotCorruptOriginalBacking(t *testing.T) {
+	const (
+		nameA = "ProfileA"
+		nameB = "ProfileB"
+		nameC = "ProfileC"
+	)
+
+	cfg := &AppConfig{
+		Profiles: []Profile{
+			{Name: nameA},
+			{Name: nameB},
+			{Name: nameC},
+		},
+	}
+
+	// Capture a snapshot of the original slice header (same backing array).
+	original := cfg.Profiles
+
+	// Delete the middle element.
+	cfg.DeleteProfile(nameB)
+
+	// The original slice must be untouched — its backing array must not have
+	// been overwritten by the delete operation.
+	if original[1].Name != nameB {
+		t.Errorf("backing array corrupted: original[1].Name = %q, want %q", original[1].Name, nameB)
+	}
+}
+
+func TestDeleteProfile_FirstElement(t *testing.T) {
+	cfg := &AppConfig{
+		Profiles: []Profile{
+			{Name: testutil.ProfileName},
+			{Name: testutil.ProfileName2},
+		},
+	}
+	cfg.DeleteProfile(testutil.ProfileName)
+	if len(cfg.Profiles) != 1 || cfg.Profiles[0].Name != testutil.ProfileName2 {
+		t.Errorf("unexpected profiles after deleting first: %v", cfg.Profiles)
+	}
+}
+
+func TestDeleteProfile_LastElement(t *testing.T) {
+	cfg := &AppConfig{
+		Profiles: []Profile{
+			{Name: testutil.ProfileName},
+			{Name: testutil.ProfileName2},
+		},
+	}
+	cfg.DeleteProfile(testutil.ProfileName2)
+	if len(cfg.Profiles) != 1 || cfg.Profiles[0].Name != testutil.ProfileName {
+		t.Errorf("unexpected profiles after deleting last: %v", cfg.Profiles)
+	}
+}
+
+func TestDeleteProfile_OnlyElement(t *testing.T) {
+	cfg := &AppConfig{
+		Profiles: []Profile{{Name: testutil.ProfileName}},
+	}
+	cfg.DeleteProfile(testutil.ProfileName)
+	if len(cfg.Profiles) != 0 {
+		t.Errorf("expected empty profiles, got %v", cfg.Profiles)
+	}
+}
