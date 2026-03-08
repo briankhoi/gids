@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -21,7 +22,8 @@ func New(dir string) *Client {
 // IsRepo reports whether dir is inside a git repository.
 func (c *Client) IsRepo() (bool, error) {
 	if err := c.runDiscard("rev-parse", "--git-dir"); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 128 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 {
 			return false, nil
 		}
 		return false, err
@@ -43,7 +45,8 @@ func (c *Client) ConfigSet(key, value string) error {
 func (c *Client) ConfigGet(key string) (string, error) {
 	out, err := c.run("config", "--local", "--get", key)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			// exit 1: key does not exist
 			return "", nil
 		}
@@ -57,7 +60,8 @@ func (c *Client) ConfigGet(key string) (string, error) {
 func (c *Client) ConfigUnset(key string) error {
 	out, err := c.run("config", "--local", "--unset", key)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 5 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 {
 			// exit 5: key does not exist
 			return nil
 		}
