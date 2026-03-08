@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"testing"
 
+	"gids/internal/config"
 	"gids/internal/git"
 	"gids/internal/testutil"
 )
@@ -117,5 +118,284 @@ func TestConfigUnset_MissingKey_NoError(t *testing.T) {
 	// Unsetting a key that was never set must not return an error.
 	if err := c.ConfigUnset("core.sshCommand"); err != nil {
 		t.Errorf("ConfigUnset on missing key: %v", err)
+	}
+}
+
+// --- Apply ---
+
+func TestApply_BasicIdentity(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "user.name", testutil.GitName)
+	assertConfigEquals(t, c, "user.email", testutil.GitEmail)
+}
+
+func TestApply_WithSSHKey_SetsSSHCommand(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		SSHKey:   testutil.SSHKey,
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+testutil.SSHKey+"'")
+}
+
+func TestApply_WithoutSSHKey_ClearsSSHCommand(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	// Pre-set a sshCommand so we can verify it gets cleared.
+	if err := c.ConfigSet("core.sshCommand", "ssh -i ~/.ssh/old_key"); err != nil {
+		t.Fatalf("ConfigSet pre-state: %v", err)
+	}
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		// SSHKey intentionally empty
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "core.sshCommand", "")
+}
+
+func TestApply_WithUsername_SetsCredentialUsername(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		Username: testutil.Username,
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "credential.username", testutil.Username)
+}
+
+func TestApply_WithoutUsername_ClearsCredentialUsername(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	if err := c.ConfigSet("credential.username", "old-user"); err != nil {
+		t.Fatalf("ConfigSet pre-state: %v", err)
+	}
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		// Username intentionally empty
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "credential.username", "")
+}
+
+func TestApply_WithSigningKey_SetsSigningKey(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	p := config.Profile{
+		Name:       testutil.ProfileName,
+		GitName:    testutil.GitName,
+		GitEmail:   testutil.GitEmail,
+		SigningKey: testutil.SigningKey,
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "user.signingKey", testutil.SigningKey)
+}
+
+func TestApply_WithoutSigningKey_ClearsSigningKey(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	if err := c.ConfigSet("user.signingKey", "OLD_KEY"); err != nil {
+		t.Fatalf("ConfigSet pre-state: %v", err)
+	}
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		// SigningKey intentionally empty
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "user.signingKey", "")
+}
+
+func TestApply_FullProfile(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	p := config.Profile{
+		Name:       testutil.ProfileName,
+		GitName:    testutil.GitName,
+		GitEmail:   testutil.GitEmail,
+		Username:   testutil.Username,
+		SSHKey:     testutil.SSHKey,
+		SigningKey: testutil.SigningKey,
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	assertConfigEquals(t, c, "user.name", testutil.GitName)
+	assertConfigEquals(t, c, "user.email", testutil.GitEmail)
+	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+testutil.SSHKey+"'")
+	assertConfigEquals(t, c, "credential.username", testutil.Username)
+	assertConfigEquals(t, c, "user.signingKey", testutil.SigningKey)
+}
+
+// --- sshCommand quoting (shell injection safety) ---
+
+// TestApply_SSHKey_WithSpaces verifies that an SSH key path containing spaces is
+// correctly single-quoted in core.sshCommand so the shell does not split it.
+func TestApply_SSHKey_WithSpaces(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+	keyPath := "/home/alice/.ssh/my key file"
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		SSHKey:   keyPath,
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	want := "ssh -i '" + keyPath + "'"
+	assertConfigEquals(t, c, "core.sshCommand", want)
+}
+
+// TestApply_SSHKey_WithSingleQuote verifies that embedded single quotes in key
+// paths are properly escaped to prevent shell injection.
+func TestApply_SSHKey_WithSingleQuote(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+	keyPath := "/home/alice/.ssh/it's_a_key"
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		SSHKey:   keyPath,
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	want := `ssh -i '/home/alice/.ssh/it'\''s_a_key'`
+	assertConfigEquals(t, c, "core.sshCommand", want)
+}
+
+// TestApply_SSHKey_Tilde verifies that a ~ prefix is preserved (passed through
+// as-is so the invoking shell can expand it at runtime).
+func TestApply_SSHKey_Tilde(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		SSHKey:   testutil.SSHKey, // "~/.ssh/id_example"
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// ~ inside single quotes is NOT expanded by the shell. Users who rely on
+	// ~ expansion must use an absolute path. The value stored is the literal
+	// single-quoted form.
+	want := "ssh -i '" + testutil.SSHKey + "'"
+	assertConfigEquals(t, c, "core.sshCommand", want)
+}
+
+// --- Error paths ---
+
+// TestApply_ErrorPropagates verifies that Apply surfaces the underlying git error
+// when git commands cannot run (e.g., non-existent working directory).
+func TestApply_ErrorPropagates(t *testing.T) {
+	c := git.New("/nonexistent/path/that/does/not/exist")
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+	}
+	if err := git.Apply(c, p); err == nil {
+		t.Error("expected error for invalid git directory, got nil")
+	}
+}
+
+// TestConfigSet_Error verifies that ConfigSet surfaces git errors.
+func TestConfigSet_Error(t *testing.T) {
+	c := git.New("/nonexistent/path/that/does/not/exist")
+	if err := c.ConfigSet("user.name", "x"); err == nil {
+		t.Error("expected error for invalid git directory, got nil")
+	}
+}
+
+// TestConfigGet_Error verifies that ConfigGet surfaces unexpected git errors
+// (i.e., errors that are not "key not found").
+func TestConfigGet_Error(t *testing.T) {
+	c := git.New("/nonexistent/path/that/does/not/exist")
+	_, err := c.ConfigGet("user.name")
+	if err == nil {
+		t.Error("expected error for invalid git directory, got nil")
+	}
+}
+
+// TestConfigUnset_Error verifies that ConfigUnset surfaces unexpected git errors.
+func TestConfigUnset_Error(t *testing.T) {
+	c := git.New("/nonexistent/path/that/does/not/exist")
+	if err := c.ConfigUnset("user.name"); err == nil {
+		t.Error("expected error for invalid git directory, got nil")
+	}
+}
+
+// assertConfigEquals is a test helper that reads a git config key and fails if
+// it does not equal want.
+func assertConfigEquals(t *testing.T, c *git.Client, key, want string) {
+	t.Helper()
+	got, err := c.ConfigGet(key)
+	if err != nil {
+		t.Fatalf("ConfigGet(%q): %v", key, err)
+	}
+	if got != want {
+		t.Errorf("%s = %q, want %q", key, got, want)
 	}
 }
