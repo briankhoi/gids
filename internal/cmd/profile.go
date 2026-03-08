@@ -458,9 +458,16 @@ func selectHostsToImport(r *bufio.Reader, w io.Writer, hosts []sshconfig.Host) (
 	return selected, nil
 }
 
+// homeDir returns the current user's home directory.
+func homeDir() (string, error) {
+	return os.UserHomeDir()
+}
+
 // tildify replaces the home directory prefix with ~.
+// Falls back to returning path unchanged if the home directory cannot be
+// determined — this is acceptable because tildify is display-only.
 func tildify(path string) string {
-	home, err := os.UserHomeDir()
+	home, err := homeDir()
 	if err != nil || home == "" {
 		return path
 	}
