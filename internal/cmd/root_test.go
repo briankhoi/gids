@@ -1,21 +1,12 @@
 package cmd_test
 
 import (
-	"bytes"
 	"strings"
 	"testing"
-
-	"gids/internal/cmd"
 )
 
 func execute(args ...string) (string, error) {
-	buf := new(bytes.Buffer)
-	root := cmd.NewRootCommand()
-	root.SetOut(buf)
-	root.SetErr(buf)
-	root.SetArgs(args)
-	err := root.Execute()
-	return buf.String(), err
+	return executeWithInput("", args...)
 }
 
 func TestHelp_ContainsUsage(t *testing.T) {

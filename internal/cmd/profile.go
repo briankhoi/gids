@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -165,20 +166,14 @@ func newProfileEditCmd(cfgPath *string) *cobra.Command {
 			out := cmd.OutOrStdout()
 			r := bufio.NewReader(cmd.InOrStdin())
 
-			gitName, err := prompt(r, out, fmt.Sprintf("Git name [%s]: ", p.GitName))
+			gitName, err := promptRequired(r, out, fmt.Sprintf("Git name [%s]: ", p.GitName), p.GitName)
 			if err != nil {
 				return err
-			}
-			if gitName == "" {
-				gitName = p.GitName
 			}
 
-			gitEmail, err := prompt(r, out, fmt.Sprintf("Git email [%s]: ", p.GitEmail))
+			gitEmail, err := promptRequired(r, out, fmt.Sprintf("Git email [%s]: ", p.GitEmail), p.GitEmail)
 			if err != nil {
 				return err
-			}
-			if gitEmail == "" {
-				gitEmail = p.GitEmail
 			}
 
 			username, err := promptOptional(r, out, "Username", p.Username)
@@ -426,7 +421,7 @@ func resolveSSHConfigPath(r *bufio.Reader, w io.Writer, filePath string) (string
 		}
 
 		if val == "0" {
-			customPath, err := prompt(r, w, "SSH config path: ")
+			customPath, err := promptRequired(r, w, "SSH config path: ", "")
 			if err != nil {
 				return "", err
 			}
@@ -434,8 +429,8 @@ func resolveSSHConfigPath(r *bufio.Reader, w io.Writer, filePath string) (string
 		}
 
 		// Validate and map to a candidate.
-		if len(val) == 1 && val[0] >= '1' && int(val[0]-'0') <= max {
-			return candidates[int(val[0]-'0')-1], nil
+		if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= max {
+			return candidates[n-1], nil
 		}
 		fmt.Fprintf(w, "Please enter a number between 0 and %d.\n", max)
 	}
