@@ -167,7 +167,10 @@ func TestProfileEdit_Success(t *testing.T) {
 		t.Errorf("expected update message, got: %s", out)
 	}
 
-	cfg, _ := config.Load(path)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if cfg.Profiles[0].GitEmail != updatedEmail {
 		t.Errorf("expected updated email %q, got: %s", updatedEmail, cfg.Profiles[0].GitEmail)
 	}
@@ -187,7 +190,10 @@ func TestProfileEdit_ClearOptionalField(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	cfg, _ := config.Load(path)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	p := cfg.Profiles[0]
 	if p.SSHKey != "" || p.Username != "" || p.SigningKey != "" {
 		t.Errorf("expected all optional fields cleared, got: SSHKey=%q Username=%q SigningKey=%q",
@@ -222,7 +228,10 @@ func TestProfileDelete_Force(t *testing.T) {
 		t.Errorf("expected delete message, got: %s", out)
 	}
 
-	cfg, _ := config.Load(path)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if len(cfg.Profiles) != 0 {
 		t.Errorf("expected 0 profiles after delete, got %d", len(cfg.Profiles))
 	}
@@ -253,7 +262,10 @@ func TestProfileDelete_ConfirmNo(t *testing.T) {
 		t.Errorf("expected 'Aborted.', got: %s", out)
 	}
 
-	cfg, _ := config.Load(path)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if len(cfg.Profiles) != 1 {
 		t.Errorf("expected profile to remain after abort, got %d profiles", len(cfg.Profiles))
 	}
@@ -365,7 +377,10 @@ func TestProfileImport_SelectiveImport(t *testing.T) {
 		t.Errorf("expected 'Created 1 profile(s)', got:\n%s", out)
 	}
 
-	cfg, _ := config.Load(cfgPath)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if len(cfg.Profiles) != 1 {
 		t.Errorf("expected 1 profile, got %d", len(cfg.Profiles))
 	}
@@ -391,7 +406,10 @@ func TestProfileImport_HostFilter(t *testing.T) {
 		t.Errorf("did not expect %q (filtered out), got:\n%s", testutil.SSHHostPersonal, out)
 	}
 
-	cfg, _ := config.Load(cfgPath)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if len(cfg.Profiles) != 1 {
 		t.Errorf("expected 1 profile after filter, got %d", len(cfg.Profiles))
 	}
@@ -415,7 +433,10 @@ func TestProfileImport_SkipDuplicate(t *testing.T) {
 		t.Errorf("expected 'already exists, skipping' warning, got:\n%s", out)
 	}
 
-	cfg, _ := config.Load(cfgPath)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if len(cfg.Profiles) != 2 {
 		t.Errorf("expected 2 profiles total, got %d", len(cfg.Profiles))
 	}
@@ -468,7 +489,10 @@ func TestProfileImport_GitNameReuse(t *testing.T) {
 		t.Errorf("expected 'Enter to reuse' prompt for second host, got:\n%s", out)
 	}
 
-	cfg, _ := config.Load(cfgPath)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	p, _ := cfg.FindProfile(testutil.SSHHostPersonal)
 	if p == nil {
 		t.Fatal("personal-vps profile not found")
