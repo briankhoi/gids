@@ -1,7 +1,9 @@
 package git_test
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"gids/internal/config"
@@ -141,6 +143,10 @@ func TestApply_BasicIdentity(t *testing.T) {
 }
 
 func TestApply_WithSSHKey_SetsSSHCommand(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
 	dir := initRepo(t)
 	c := git.New(dir)
 
@@ -154,7 +160,8 @@ func TestApply_WithSSHKey_SetsSSHCommand(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+testutil.SSHKey+"'")
+	expanded := filepath.Join(home, ".ssh/id_example")
+	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+expanded+"'")
 }
 
 func TestApply_WithoutSSHKey_ClearsSSHCommand(t *testing.T) {
@@ -256,6 +263,10 @@ func TestApply_WithoutSigningKey_ClearsSigningKey(t *testing.T) {
 }
 
 func TestApply_FullProfile(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
 	dir := initRepo(t)
 	c := git.New(dir)
 
@@ -271,9 +282,10 @@ func TestApply_FullProfile(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
+	expanded := filepath.Join(home, ".ssh/id_example")
 	assertConfigEquals(t, c, "user.name", testutil.GitName)
 	assertConfigEquals(t, c, "user.email", testutil.GitEmail)
-	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+testutil.SSHKey+"'")
+	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+expanded+"'")
 	assertConfigEquals(t, c, "credential.username", testutil.Username)
 	assertConfigEquals(t, c, "user.signingKey", testutil.SigningKey)
 }
@@ -322,9 +334,38 @@ func TestApply_SSHKey_WithSingleQuote(t *testing.T) {
 	assertConfigEquals(t, c, "core.sshCommand", want)
 }
 
-// TestApply_SSHKey_Tilde verifies that a ~ prefix is preserved (passed through
-// as-is so the invoking shell can expand it at runtime).
+// TestApply_SSHKey_TildeIsExpanded verifies that a ~ prefix is expanded to the
+// absolute home directory at store time, so git can locate the key without
+// relying on shell tilde expansion (which does not occur inside single quotes).
+func TestApply_SSHKey_TildeIsExpanded(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	p := config.Profile{
+		Name:     testutil.ProfileName,
+		GitName:  testutil.GitName,
+		GitEmail: testutil.GitEmail,
+		SSHKey:   "~/.ssh/id_work",
+	}
+	if err := git.Apply(c, p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	want := "ssh -i '" + filepath.Join(home, ".ssh/id_work") + "'"
+	assertConfigEquals(t, c, "core.sshCommand", want)
+}
+
+// TestApply_SSHKey_Tilde verifies that the legacy testutil.SSHKey fixture
+// (which uses a ~ prefix) is stored with the ~ expanded to an absolute path.
 func TestApply_SSHKey_Tilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
 	dir := initRepo(t)
 	c := git.New(dir)
 
@@ -338,10 +379,9 @@ func TestApply_SSHKey_Tilde(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	// ~ inside single quotes is NOT expanded by the shell. Users who rely on
-	// ~ expansion must use an absolute path. The value stored is the literal
-	// single-quoted form.
-	want := "ssh -i '" + testutil.SSHKey + "'"
+	// ~ is expanded to the absolute home directory at store time so git can
+	// locate the key; single-quoted paths inside sh -c do not tilde-expand.
+	want := "ssh -i '" + filepath.Join(home, ".ssh/id_example") + "'"
 	assertConfigEquals(t, c, "core.sshCommand", want)
 }
 

@@ -2,7 +2,9 @@ package cmd_test
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,10 +52,14 @@ func TestUse_AppliesProfile(t *testing.T) {
 	}
 
 	// Verify .git/config was updated.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
 	c := git.New(repoDir)
 	assertGitConfig(t, c, "user.name", testutil.GitName)
 	assertGitConfig(t, c, "user.email", testutil.GitEmail)
-	assertGitConfig(t, c, "core.sshCommand", "ssh -i '"+testutil.SSHKey+"'")
+	assertGitConfig(t, c, "core.sshCommand", "ssh -i '"+filepath.Join(home, ".ssh/id_example")+"'")
 	assertGitConfig(t, c, "credential.username", testutil.Username)
 	assertGitConfig(t, c, "user.signingKey", testutil.SigningKey)
 }
