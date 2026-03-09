@@ -86,6 +86,19 @@ func (c *AppConfig) LookupProfile(name string) *Profile {
 	return p
 }
 
+// LookupProfileByIdentity returns the profile whose GitName and GitEmail both
+// match name and email, or nil if no profile matches. Used by status and
+// check commands to identify the active profile from the current git identity.
+func (c *AppConfig) LookupProfileByIdentity(name, email string) *Profile {
+	for i := range c.Profiles {
+		if c.Profiles[i].GitName == name && c.Profiles[i].GitEmail == email {
+			p := c.Profiles[i] // copy — avoids returning a pointer into the slice
+			return &p
+		}
+	}
+	return nil
+}
+
 // DeleteProfile removes the profile with the given name.
 // Returns false if not found.
 func (c *AppConfig) DeleteProfile(name string) bool {
