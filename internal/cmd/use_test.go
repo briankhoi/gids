@@ -43,7 +43,8 @@ func TestUse_AppliesProfile(t *testing.T) {
 	cfgDir := t.TempDir()
 	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
 
-	out, err := execute("use", testutil.ProfileName, "--config", cfgPath)
+	// Decline the "save rule?" prompt — this test is only about git config values.
+	out, err := executeWithInput("n\n", "use", testutil.ProfileName, "--config", cfgPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,7 +125,8 @@ func TestUse_OutputIncludesIdentity(t *testing.T) {
 	cfgDir := t.TempDir()
 	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
 
-	out, err := execute("use", testutil.ProfileName, "--config", cfgPath)
+	// Decline the "save rule?" prompt — this test is only about output identity strings.
+	out, err := executeWithInput("n\n", "use", testutil.ProfileName, "--config", cfgPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,6 +135,126 @@ func TestUse_OutputIncludesIdentity(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in output, got: %s", want, out)
 		}
+	}
+}
+
+// --- smart prompt: save rule after 'gids use' ---
+
+func TestUse_SmartPrompt_AcceptsYes_SavesRule(t *testing.T) {
+	repoDir := initGitRepo(t)
+	t.Chdir(repoDir)
+
+	cfgDir := t.TempDir()
+	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
+
+	// Answer "y" to the "Always use..." prompt.
+	out, err := executeWithInput("y\n", "use", testutil.ProfileName, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Always use") {
+		t.Errorf("expected prompt in output, got: %s", out)
+	}
+
+	// Verify rule was saved.
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	_, matched := config.MatchRule(cfg.Rules, repoDir)
+	if !matched {
+		t.Errorf("expected rule for %q to be saved, rules: %v", repoDir, cfg.Rules)
+	}
+}
+
+func TestUse_SmartPrompt_AcceptsNo_NoRuleSaved(t *testing.T) {
+	repoDir := initGitRepo(t)
+	t.Chdir(repoDir)
+
+	cfgDir := t.TempDir()
+	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
+
+	// Answer "n" — no rule should be created.
+	_, err := executeWithInput("n\n", "use", testutil.ProfileName, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if len(cfg.Rules) != 0 {
+		t.Errorf("expected no rules after decline, got: %v", cfg.Rules)
+	}
+}
+
+func TestUse_SmartPrompt_DefaultYes_SavesRule(t *testing.T) {
+	repoDir := initGitRepo(t)
+	t.Chdir(repoDir)
+
+	cfgDir := t.TempDir()
+	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
+
+	// Empty input → default Y.
+	_, err := executeWithInput("\n", "use", testutil.ProfileName, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	_, matched := config.MatchRule(cfg.Rules, repoDir)
+	if !matched {
+		t.Errorf("expected rule saved with default yes, rules: %v", cfg.Rules)
+	}
+}
+
+func TestUse_SmartPrompt_SecondRun_NoPrompt(t *testing.T) {
+	// Verify that once a tilde-keyed rule is saved on the first run, the second
+	// run correctly detects the match and skips the prompt — exercising the
+	// tildify/MatchRule round-trip through expandTilde.
+	repoDir := initGitRepo(t)
+	t.Chdir(repoDir)
+
+	cfgDir := t.TempDir()
+	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
+
+	// First run: accept the prompt → rule saved with tildified key.
+	if _, err := executeWithInput("y\n", "use", testutil.ProfileName, "--config", cfgPath); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Second run: must not show the prompt.
+	out, err := execute("use", testutil.ProfileName, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if strings.Contains(out, "Always use") {
+		t.Errorf("expected no prompt on second run, got: %s", out)
+	}
+}
+
+func TestUse_SmartPrompt_RuleAlreadyExists_NoPrompt(t *testing.T) {
+	repoDir := initGitRepo(t)
+	t.Chdir(repoDir)
+
+	cfgDir := t.TempDir()
+	cfg := &config.AppConfig{
+		Profiles: []config.Profile{workProfile()},
+		Rules:    map[string]string{repoDir: testutil.ProfileName},
+	}
+	cfgPath := writeRuleConfig(t, cfgDir, cfg)
+
+	// Empty stdin — prompt must not appear because rule already exists.
+	out, err := execute("use", testutil.ProfileName, "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "Always use") {
+		t.Errorf("expected no prompt when rule already exists, got: %s", out)
 	}
 }
 
