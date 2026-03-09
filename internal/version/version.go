@@ -1,5 +1,7 @@
 package version
 
-// Version is the current version of gids.
-// Overridden at build time via: -ldflags "-X gids/internal/version.Version=x.y.z"
-var Version = "dev"
+// version is set at build time via: -ldflags "-X gids/internal/version.version=x.y.z"
+var version = "dev"
+
+// Get returns the current version of gids.
+func Get() string { return version }

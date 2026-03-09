@@ -21,7 +21,7 @@ builds:
       # Strips symbols (-s -w) for smaller release binary
       - -s -w
       # Version injection via -X flag ({{.Version}} populated from git tag)
-      - -X gids/internal/version.Version={{.Version}}
+      - -X gids/internal/version.version={{.Version}}
     binary: gids
 
 archives:

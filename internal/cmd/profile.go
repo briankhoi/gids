@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -42,12 +41,6 @@ func printProfileTable(w io.Writer, profiles []config.Profile) {
 	tw.Flush()
 }
 
-func warnNoAuth(w io.Writer, username, sshKey, signingKey string) {
-	if username == "" && sshKey == "" && signingKey == "" {
-		fmt.Fprintln(w, "No auth method set - push/pull will use your system default.")
-	}
-}
-
 func newProfileAddCmd(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "add",
@@ -58,67 +51,18 @@ func newProfileAddCmd(cfgPath *string) *cobra.Command {
 				return fmt.Errorf("loading config: %w", err)
 			}
 
-			out := cmd.OutOrStdout()
-			r := bufio.NewReader(cmd.InOrStdin())
-
-			name, err := prompt(r, out, "Profile name (e.g. Work, Personal): ")
-			if err != nil {
-				return err
-			}
-			if name == "" {
-				return fmt.Errorf("profile name is required")
-			}
-			if p, _ := cfg.FindProfile(name); p != nil {
-				return fmt.Errorf("profile %q already exists", name)
-			}
-
-			gitName, err := prompt(r, out, "Git name: ")
-			if err != nil {
-				return err
-			}
-			if gitName == "" {
-				return fmt.Errorf("git name is required")
-			}
-
-			gitEmail, err := prompt(r, out, "Git email: ")
-			if err != nil {
-				return err
-			}
-			if gitEmail == "" {
-				return fmt.Errorf("git email is required")
-			}
-
-			username, err := prompt(r, out, "Username (optional, for HTTPS — sets credential.username, Enter to skip): ")
+			p, err := buildProfileFromPrompts(bufio.NewReader(cmd.InOrStdin()), cmd.OutOrStdout(), cfg)
 			if err != nil {
 				return err
 			}
 
-			sshKey, err := prompt(r, out, "SSH key path (optional, e.g. ~/.ssh/id_work, Enter to skip): ")
-			if err != nil {
-				return err
-			}
-
-			signingKey, err := prompt(r, out, "Signing key (optional, GPG fingerprint or SSH key path, Enter to skip): ")
-			if err != nil {
-				return err
-			}
-
-			warnNoAuth(out, username, sshKey, signingKey)
-
-			cfg.Profiles = append(cfg.Profiles, config.Profile{
-				Name:       name,
-				GitName:    gitName,
-				GitEmail:   gitEmail,
-				Username:   username,
-				SSHKey:     sshKey,
-				SigningKey: signingKey,
-			})
+			cfg.Profiles = append(cfg.Profiles, p)
 
 			if err := config.Save(cfg, *cfgPath); err != nil {
 				return fmt.Errorf("saving config: %w", err)
 			}
 
-			fmt.Fprintf(out, "Profile %q added.\n", name)
+			fmt.Fprintf(cmd.OutOrStdout(), "Profile %q added.\n", p.Name)
 			return nil
 		},
 	}
@@ -263,7 +207,6 @@ func newProfileImportCmd(cfgPath *string) *cobra.Command {
 			out := cmd.OutOrStdout()
 			r := bufio.NewReader(cmd.InOrStdin())
 
-			// Resolve which SSH config file to use.
 			resolvedPath, err := resolveSSHConfigPath(r, out, filePath)
 			if err != nil {
 				return err
@@ -275,24 +218,13 @@ func newProfileImportCmd(cfgPath *string) *cobra.Command {
 				return err
 			}
 
-			// Apply --host filter if set.
-			if hostFilter != "" {
-				var filtered []sshconfig.Host
-				lower := strings.ToLower(hostFilter)
-				for _, h := range hosts {
-					if strings.Contains(strings.ToLower(h.Pattern), lower) {
-						filtered = append(filtered, h)
-					}
-				}
-				hosts = filtered
-			}
+			hosts = filterHosts(hosts, hostFilter)
 
 			if len(hosts) == 0 {
 				fmt.Fprintf(out, "No SSH host entries found in %s.\n", resolvedPath)
 				return nil
 			}
 
-			// Display found hosts.
 			fmt.Fprintf(out, "Found %d host entr%s:\n", len(hosts), pluralSuffix(len(hosts), "y", "ies"))
 			for i, h := range hosts {
 				fmt.Fprintf(out, "  [%d] %-20s IdentityFile: %-25s User: %s\n",
@@ -300,7 +232,6 @@ func newProfileImportCmd(cfgPath *string) *cobra.Command {
 			}
 			fmt.Fprintln(out)
 
-			// Determine which hosts to import.
 			toImport, err := selectHostsToImport(r, out, hosts)
 			if err != nil {
 				return err
@@ -310,7 +241,6 @@ func newProfileImportCmd(cfgPath *string) *cobra.Command {
 				return nil
 			}
 
-			// Load config once.
 			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
@@ -321,43 +251,14 @@ func newProfileImportCmd(cfgPath *string) *cobra.Command {
 
 			for _, h := range toImport {
 				fmt.Fprintf(out, "\n--- Importing %q ---\n", h.Pattern)
-
-				// Skip if profile already exists.
-				if p, _ := cfg.FindProfile(h.Pattern); p != nil {
-					fmt.Fprintf(out, "Profile %q already exists, skipping.\n", h.Pattern)
+				p, ok, err := importHost(r, out, cfg, h, lastGitName)
+				if err != nil {
+					return err
+				}
+				if !ok {
 					continue
 				}
-
-				// Warn if no IdentityFile.
-				if h.IdentityFile == "" {
-					fmt.Fprintf(out, "No IdentityFile set for %q — SSH key will be empty.\n", h.Pattern)
-				}
-
-				// Prompt for required Git name.
-				namePrompt := "Git name (required): "
-				if lastGitName != "" {
-					namePrompt = fmt.Sprintf("Git name [%s] (Enter to reuse, or type new): ", lastGitName)
-				}
-				gitName, err := promptRequired(r, out, namePrompt, lastGitName)
-				if err != nil {
-					return err
-				}
-				lastGitName = gitName
-
-				// Prompt for required Git email.
-				gitEmail, err := promptRequired(r, out, "Git email (required): ", "")
-				if err != nil {
-					return err
-				}
-
-				p := config.Profile{
-					Name:     h.Pattern,
-					GitName:  gitName,
-					GitEmail: gitEmail,
-					Username: h.User,
-					SSHKey:   h.IdentityFile,
-				}
-				cfg.Profiles = append(cfg.Profiles, p)
+				lastGitName = p.GitName
 				created = append(created, p)
 				fmt.Fprintf(out, "Profile %q created.\n", h.Pattern)
 			}
@@ -386,78 +287,6 @@ func newProfileImportCmd(cfgPath *string) *cobra.Command {
 	return cmd
 }
 
-// resolveSSHConfigPath returns the SSH config path to use. If filePath is set,
-// it's used directly. Otherwise, the user is prompted to pick from known paths.
-func resolveSSHConfigPath(r *bufio.Reader, w io.Writer, filePath string) (string, error) {
-	if filePath != "" {
-		return filePath, nil
-	}
-
-	candidates, err := sshconfig.DefaultConfigPaths()
-	if err != nil {
-		return "", fmt.Errorf("resolving SSH config paths: %w", err)
-	}
-	fmt.Fprintln(w, "Known SSH config locations:")
-	for i, p := range candidates {
-		status := "not found"
-		if _, err := os.Stat(p); err == nil {
-			status = "found"
-		}
-		fmt.Fprintf(w, "  [%d] %-35s (%s)\n", i+1, tildify(p), status)
-	}
-	fmt.Fprintln(w, "  [0] Enter a custom path")
-	fmt.Fprintln(w)
-
-	// Build prompt showing the full valid range, e.g. "Enter 0–2 [default: 1]: "
-	max := len(candidates)
-	for {
-		val, err := prompt(r, w, fmt.Sprintf("Enter 0-%d [default: 1]: ", max))
-		if err != nil {
-			return "", err
-		}
-		if val == "" {
-			val = "1"
-		}
-
-		if val == "0" {
-			customPath, err := promptRequired(r, w, "SSH config path: ", "")
-			if err != nil {
-				return "", err
-			}
-			return customPath, nil
-		}
-
-		// Validate and map to a candidate.
-		if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= max {
-			return candidates[n-1], nil
-		}
-		fmt.Fprintf(w, "Please enter a number between 0 and %d.\n", max)
-	}
-}
-
-// selectHostsToImport asks the user which hosts to import, returning the selection.
-func selectHostsToImport(r *bufio.Reader, w io.Writer, hosts []sshconfig.Host) ([]sshconfig.Host, error) {
-	all, err := confirmPrompt(r, w, "Import all?", true)
-	if err != nil {
-		return nil, err
-	}
-	if all {
-		return hosts, nil
-	}
-
-	var selected []sshconfig.Host
-	for _, h := range hosts {
-		ok, err := confirmPrompt(r, w, fmt.Sprintf("Import %q?", h.Pattern), false)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			selected = append(selected, h)
-		}
-	}
-	return selected, nil
-}
-
 // homeDir returns the current user's home directory.
 func homeDir() (string, error) {
 	return os.UserHomeDir()
@@ -478,19 +307,6 @@ func tildify(path string) string {
 		return "~"
 	}
 	return path
-}
-
-// editedProfile returns a new Profile with the provided field values applied to
-// base. The Name field is preserved; no fields of base are mutated.
-func editedProfile(base config.Profile, gitName, gitEmail, username, sshKey, signingKey string) config.Profile {
-	return config.Profile{
-		Name:       base.Name,
-		GitName:    gitName,
-		GitEmail:   gitEmail,
-		Username:   username,
-		SSHKey:     sshKey,
-		SigningKey:  signingKey,
-	}
 }
 
 // pluralSuffix returns singular if n==1, plural otherwise.
