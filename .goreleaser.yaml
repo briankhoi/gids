@@ -25,8 +25,7 @@ builds:
     binary: gids
 
 archives:
-  - format: tar.gz
-    name_template: >-
+  - name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
       {{- title .Os }}_
@@ -34,21 +33,21 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-    format_overrides:
-      - goos: windows
-        format: zip
+    files:
+      - LICENSE
+      - README.md
 
 checksum:
-  name_template: 'checksums.txt'
+  name_template: "checksums.txt"
 
 changelog:
   sort: asc
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
-      - '^chore:'
-      - '^ci:'
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
 
 release:
   github:
@@ -61,13 +60,38 @@ release:
   header: |
     ## Release {{.Version}}
 
-    Install with:
+    ### Installation
+
+    **macOS (Apple Silicon)**
     ```bash
-    # macOS/Linux
-    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/{{ .ProjectName }}_{{.Version}}_{{.Os}}_{{.Arch}}.tar.gz | tar xz
-    
-    # Or download binaries directly from assets below
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Darwin_arm64.tar.gz | tar xz
+    sudo mv gids /usr/local/bin/
     ```
+
+    **macOS (Intel)**
+    ```bash
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Darwin_x86_64.tar.gz | tar xz
+    sudo mv gids /usr/local/bin/
+    ```
+
+    **Linux (x86_64)**
+    ```bash
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Linux_x86_64.tar.gz | tar xz
+    sudo mv gids /usr/local/bin/
+    ```
+
+    **Linux (ARM64)**
+    ```bash
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Linux_arm64.tar.gz | tar xz
+    sudo mv gids /usr/local/bin/
+    ```
+
+    **Windows (x86_64)**
+    ```powershell
+    # Download and extract gids_{{.Version}}_Windows_x86_64.zip
+    # Move gids.exe to a directory in your PATH
+    ```
+
+    Or download the appropriate binary directly from the assets below.
   footer: |
     **Full Changelog**: https://github.com/{{ .Env.GITHUB_REPOSITORY }}/compare/{{.PreviousTag}}...{{.Tag}}
-
