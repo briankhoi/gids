@@ -21,37 +21,59 @@ func expandTilde(path, homeDir string) string {
 	return path
 }
 
-// matchRule is the pure inner implementation with an injected home directory.
-// It iterates all rules and returns the profile name of the most specific
-// (longest glob) match, or "", false if nothing matches.
+// findMatchingRule is the pure inner implementation with an injected home
+// directory. It returns the original stored glob key (not the expanded form)
+// so callers can use it directly as a map key for deletion.
 //
 // Specificity is measured by expanded glob length. This heuristic works well
 // in practice but does not account for every structural edge case (e.g. a
-// wildcard segment vs. a literal segment of the same depth). 
+// wildcard segment vs. a literal segment of the same depth).
 //
 // Invalid glob patterns (filepath.ErrBadPattern) are silently skipped; a
 // misconfigured rule is ignored rather than blocking all matches.
-func matchRule(rules map[string]string, path, home string) (string, bool) {
+func findMatchingRule(rules map[string]string, path, home string) (glob, profile string, ok bool) {
 	bestGlob := ""
 	bestProfile := ""
+	bestLen := 0
 
-	for glob, profile := range rules {
-		expanded := expandTilde(glob, home)
+	for g, p := range rules {
+		expanded := expandTilde(g, home)
 		matched, err := filepath.Match(expanded, path)
 		if err != nil || !matched {
 			continue
 		}
 		// Prefer the most specific (longest) matching glob.
-		if len(expanded) > len(bestGlob) {
-			bestGlob = expanded
-			bestProfile = profile
+		if len(expanded) > bestLen {
+			bestLen = len(expanded)
+			bestGlob = g // preserve original stored key
+			bestProfile = p
 		}
 	}
 
-	if bestProfile == "" {
-		return "", false
+	if bestGlob == "" {
+		return "", "", false
 	}
-	return bestProfile, true
+	return bestGlob, bestProfile, true
+}
+
+// matchRule returns the profile name of the most specific matching rule.
+func matchRule(rules map[string]string, path, home string) (string, bool) {
+	_, profile, ok := findMatchingRule(rules, path, home)
+	return profile, ok
+}
+
+// FindMatchingRule returns the original glob key, profile name, and true for
+// the most specific rule that matches path. Returns "", "", false if nothing
+// matches. Use this over MatchRule when you need the glob key (e.g. to delete
+// the rule).
+//
+// If os.UserHomeDir fails (e.g. no $HOME set), tilde globs are not expanded
+// and will silently not match. This is intentional: the fallback is safe and
+// only affects unusual environments. Use findMatchingRule directly when you
+// need explicit control over the home directory (e.g. in tests).
+func FindMatchingRule(rules map[string]string, path string) (glob, profile string, ok bool) {
+	home, _ := os.UserHomeDir() // expandTilde handles the empty-home fallback
+	return findMatchingRule(rules, path, home)
 }
 
 // MatchRule finds the most specific matching rule for path.

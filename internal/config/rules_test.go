@@ -135,6 +135,89 @@ func TestMatchRule_Public_TildeExpansion(t *testing.T) {
 	}
 }
 
+// --- FindMatchingRule ---
+
+func TestFindMatchingRule_ReturnsGlobAndProfile(t *testing.T) {
+	rules := map[string]string{
+		testutil.RuleGlobWork: testutil.ProfileName,
+	}
+	glob, profile, ok := findMatchingRule(rules, testutil.RulePathWork, testutil.RuleHome)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if glob != testutil.RuleGlobWork {
+		t.Errorf("glob = %q, want %q", glob, testutil.RuleGlobWork)
+	}
+	if profile != testutil.ProfileName {
+		t.Errorf("profile = %q, want %q", profile, testutil.ProfileName)
+	}
+}
+
+func TestFindMatchingRule_MostSpecificGlobReturned(t *testing.T) {
+	rules := map[string]string{
+		testutil.RuleGlobWork: testutil.ProfileName,
+		testutil.RuleGlobOSS:  testutil.ProfileName3,
+	}
+	glob, profile, ok := findMatchingRule(rules, testutil.RulePathOSS, testutil.RuleHome)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if glob != testutil.RuleGlobOSS {
+		t.Errorf("glob = %q, want %q", glob, testutil.RuleGlobOSS)
+	}
+	if profile != testutil.ProfileName3 {
+		t.Errorf("profile = %q, want %q", profile, testutil.ProfileName3)
+	}
+}
+
+func TestFindMatchingRule_NoMatch(t *testing.T) {
+	rules := map[string]string{
+		testutil.RuleGlobWork: testutil.ProfileName,
+	}
+	_, _, ok := findMatchingRule(rules, testutil.RulePathPersonal, testutil.RuleHome)
+	if ok {
+		t.Error("expected no match")
+	}
+}
+
+func TestFindMatchingRule_PreservesOriginalGlobKey(t *testing.T) {
+	// The returned glob must be the original stored key (tilde form), not the
+	// expanded form — callers use it as the map key for deletion.
+	rules := map[string]string{
+		testutil.RuleGlobWorkTilde: testutil.ProfileName,
+	}
+	glob, _, ok := findMatchingRule(rules, testutil.RulePathWork, testutil.RuleHome)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if glob != testutil.RuleGlobWorkTilde {
+		t.Errorf("glob = %q, want original tilde key %q", glob, testutil.RuleGlobWorkTilde)
+	}
+}
+
+// --- FindMatchingRule (public) ---
+
+func TestFindMatchingRule_Public_TildeExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+	rules := map[string]string{
+		testutil.RuleGlobWorkTilde: testutil.ProfileName,
+	}
+	path := filepath.Join(home, "work", "myproject")
+	glob, profile, ok := FindMatchingRule(rules, path)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if glob != testutil.RuleGlobWorkTilde {
+		t.Errorf("glob = %q, want %q", glob, testutil.RuleGlobWorkTilde)
+	}
+	if profile != testutil.ProfileName {
+		t.Errorf("profile = %q, want %q", profile, testutil.ProfileName)
+	}
+}
+
 // --- AppConfig.AddRule / RemoveRule ---
 
 func TestAddRule_NewRule(t *testing.T) {
