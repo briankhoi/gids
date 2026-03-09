@@ -114,6 +114,27 @@ func TestSave_MultipleProfiles(t *testing.T) {
 	}
 }
 
+func TestLookupProfile(t *testing.T) {
+	cfg := &AppConfig{
+		Profiles: []Profile{
+			{Name: testutil.ProfileName, GitName: testutil.GitName},
+			{Name: testutil.ProfileName2, GitName: testutil.GitName},
+		},
+	}
+
+	p := cfg.LookupProfile(testutil.ProfileName)
+	if p == nil {
+		t.Fatalf("expected to find %q", testutil.ProfileName)
+	}
+	if p.Name != testutil.ProfileName {
+		t.Errorf("Name = %q, want %q", p.Name, testutil.ProfileName)
+	}
+
+	if got := cfg.LookupProfile("Missing"); got != nil {
+		t.Errorf("expected nil for missing profile, got %+v", got)
+	}
+}
+
 func TestFindProfile(t *testing.T) {
 	cfg := &AppConfig{
 		Profiles: []Profile{

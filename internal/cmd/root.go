@@ -45,6 +45,7 @@ The shell hook applies the matching profile automatically when you cd.`,
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newProfileCmd())
 	root.AddCommand(newUseCmd())
+	root.AddCommand(newRuleCmd())
 
 	return root
 }
