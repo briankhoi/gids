@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -32,7 +34,12 @@ func newUseCmd() *cobra.Command {
 				return fmt.Errorf("profile %q is incomplete: %w", name, err)
 			}
 
-			client := git.New(".")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting current directory: %w", err)
+			}
+
+			client := git.New(cwd)
 			ok, err := client.IsRepo()
 			if err != nil {
 				return fmt.Errorf("checking git repo: %w", err)
@@ -47,6 +54,26 @@ func newUseCmd() *cobra.Command {
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Applied profile %q (%s <%s>).\n",
 				p.Name, p.GitName, p.GitEmail)
+
+			// If this directory is not yet governed by a rule, offer to save one.
+			_, alreadyMapped := config.MatchRule(cfg.Rules, cwd)
+			if !alreadyMapped {
+				displayDir := tildify(cwd)
+				r := bufio.NewReader(cmd.InOrStdin())
+				save, err := confirmPrompt(r, cmd.OutOrStdout(),
+					fmt.Sprintf("Always use %q for %s?", name, displayDir), true)
+				if err != nil {
+					return fmt.Errorf("reading response: %w", err)
+				}
+				if save {
+					cfg.AddRule(displayDir, name)
+					if err := config.Save(cfg, cfgPath); err != nil {
+						return fmt.Errorf("saving rule: %w", err)
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "Rule saved: %s -> %s\n", displayDir, name)
+				}
+			}
+
 			return nil
 		},
 	}
