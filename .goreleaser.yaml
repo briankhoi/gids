@@ -51,40 +51,28 @@ release:
   make_latest: true
   mode: replace
   header: |
-    ## Release {{.Version}}
+    ## gids {{.Version}}
 
     ### Installation
 
-    **macOS (Apple Silicon)**
-    ```bash
-    curl -sL [https://github.com/](https://github.com/){{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Darwin_arm64.tar.gz | tar xz
-    sudo mv gids /usr/local/bin/
+    **macOS and Linux** — pick your architecture:
+
+    ```sh
+    # macOS (Apple Silicon)
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Darwin_arm64.tar.gz | tar xz && sudo mv gids /usr/local/bin/
+
+    # macOS (Intel)
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Darwin_x86_64.tar.gz | tar xz && sudo mv gids /usr/local/bin/
+
+    # Linux (x86_64)
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Linux_x86_64.tar.gz | tar xz && sudo mv gids /usr/local/bin/
+
+    # Linux (ARM64)
+    curl -sL https://github.com/{{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Linux_arm64.tar.gz | tar xz && sudo mv gids /usr/local/bin/
     ```
 
-    **macOS (Intel)**
-    ```bash
-    curl -sL [https://github.com/](https://github.com/){{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Darwin_x86_64.tar.gz | tar xz
-    sudo mv gids /usr/local/bin/
-    ```
+    **Windows** — download `gids_{{.Version}}_Windows_x86_64.zip` from the assets below and place `gids.exe` on your `PATH`.
 
-    **Linux (x86_64)**
-    ```bash
-    curl -sL [https://github.com/](https://github.com/){{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Linux_x86_64.tar.gz | tar xz
-    sudo mv gids /usr/local/bin/
-    ```
-
-    **Linux (ARM64)**
-    ```bash
-    curl -sL [https://github.com/](https://github.com/){{ .Env.GITHUB_REPOSITORY }}/releases/download/{{.Tag}}/gids_{{.Version}}_Linux_arm64.tar.gz | tar xz
-    sudo mv gids /usr/local/bin/
-    ```
-
-    **Windows (x86_64)**
-    ```powershell
-    # Download and extract gids_{{.Version}}_Windows_x86_64.zip
-    # Move gids.exe to a directory in your PATH
-    ```
-
-    Or download the appropriate binary directly from the assets below.
+    ---
   footer: |
     **Full Changelog**: https://github.com/{{ .Env.GITHUB_REPOSITORY }}/compare/{{.PreviousTag}}...{{.Tag}}
