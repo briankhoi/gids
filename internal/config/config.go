@@ -79,6 +79,13 @@ func (c *AppConfig) FindProfile(name string) (*Profile, int) {
 	return nil, -1
 }
 
+// LookupProfile returns the profile with the given name, or nil if not found.
+// Use this over FindProfile when the index is not needed.
+func (c *AppConfig) LookupProfile(name string) *Profile {
+	p, _ := c.FindProfile(name)
+	return p
+}
+
 // DeleteProfile removes the profile with the given name.
 // Returns false if not found.
 func (c *AppConfig) DeleteProfile(name string) bool {

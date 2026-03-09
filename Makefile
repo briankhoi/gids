@@ -2,7 +2,7 @@ VERSION ?= dev
 BINARY  := gids
 DIST    := dist
 
-LDFLAGS_BASE := -X gids/internal/version.Version=$(VERSION)
+LDFLAGS_BASE := -X gids/internal/version.version=$(VERSION)
 LDFLAGS_DEV  := -ldflags "$(LDFLAGS_BASE)"
 
 .PHONY: build test test-coverage coverage-html coverage-terminal vet run snapshot clean

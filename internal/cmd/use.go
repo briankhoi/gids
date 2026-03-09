@@ -24,7 +24,7 @@ func newUseCmd() *cobra.Command {
 				return fmt.Errorf("loading config: %w", err)
 			}
 
-			p, _ := cfg.FindProfile(name)
+			p := cfg.LookupProfile(name)
 			if p == nil {
 				return fmt.Errorf("profile %q not found", name)
 			}

@@ -15,7 +15,7 @@ func newVersionCommand() *cobra.Command {
 		Example: "  gids version",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "gids version %s\n", version.Version)
+			fmt.Fprintf(cmd.OutOrStdout(), "gids version %s\n", version.Get())
 			return nil
 		},
 	}
