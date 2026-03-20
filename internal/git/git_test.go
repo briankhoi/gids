@@ -417,6 +417,63 @@ func TestConfigGetEffective_UnsetKey_ReturnsEmpty(t *testing.T) {
 	}
 }
 
+// --- ConfigSetGlobal / ConfigGetGlobal / ConfigUnsetGlobal ---
+
+func TestConfigSetGlobal_And_GetGlobal(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+
+	if err := git.ConfigSetGlobal("test.key", "hello"); err != nil {
+		t.Fatalf("ConfigSetGlobal: %v", err)
+	}
+
+	got, err := git.ConfigGetGlobal("test.key")
+	if err != nil {
+		t.Fatalf("ConfigGetGlobal: %v", err)
+	}
+	if got != "hello" {
+		t.Errorf("ConfigGetGlobal = %q, want %q", got, "hello")
+	}
+}
+
+func TestConfigGetGlobal_UnsetKey_ReturnsEmpty(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+
+	got, err := git.ConfigGetGlobal("test.nonexistent")
+	if err != nil {
+		t.Fatalf("ConfigGetGlobal on unset key: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty string for unset key, got %q", got)
+	}
+}
+
+func TestConfigUnsetGlobal_ExistingKey(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+
+	if err := git.ConfigSetGlobal("test.key", "value"); err != nil {
+		t.Fatalf("ConfigSetGlobal: %v", err)
+	}
+	if err := git.ConfigUnsetGlobal("test.key"); err != nil {
+		t.Fatalf("ConfigUnsetGlobal: %v", err)
+	}
+
+	got, err := git.ConfigGetGlobal("test.key")
+	if err != nil {
+		t.Fatalf("ConfigGetGlobal after unset: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected key removed after unset, got %q", got)
+	}
+}
+
+func TestConfigUnsetGlobal_MissingKey_NoError(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+
+	if err := git.ConfigUnsetGlobal("test.nonexistent"); err != nil {
+		t.Errorf("ConfigUnsetGlobal on missing key: %v", err)
+	}
+}
+
 // --- Error paths ---
 
 // TestApply_ErrorPropagates verifies that Apply surfaces the underlying git error
