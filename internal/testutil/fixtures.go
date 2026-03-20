@@ -20,6 +20,16 @@ const (
 	SSHHostPersonal = "personal-vps"
 	SSHUser         = "git"
 
+	// Guard test fixtures: an identity that does not match any standard profile,
+	// used across pre-commit guard tests (quick-create, selector, wizard flows).
+	GitNameUnknown  = "Other Person"
+	GitEmailUnknown = "other@example.com"
+
+	// Wizard test fixtures: values a user types during inline profile creation.
+	GitNameNew     = "My Real Name"
+	GitEmailNew    = "myreal@example.com"
+	ProfileNameNew = "NewProfile"
+
 	// Rule engine test fixtures: a synthetic home directory and associated
 	// glob patterns / paths used across rules and rule-command tests.
 	RuleHome              = "/home/user"

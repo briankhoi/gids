@@ -49,6 +49,7 @@ The shell hook applies the matching profile automatically when you cd.`,
 	root.AddCommand(newHookCmd())
 	root.AddCommand(newCheckCmd())
 	root.AddCommand(newStatusCmd())
+	root.AddCommand(newGuardCmd())
 
 	return root
 }

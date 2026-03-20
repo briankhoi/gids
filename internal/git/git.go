@@ -55,6 +55,21 @@ func (c *Client) ConfigGet(key string) (string, error) {
 	return strings.TrimRight(out, "\n"), nil
 }
 
+// ConfigGetEffective reads the effective (local → global → system) git config
+// value for key. Returns "", nil if the key is not set at any level.
+func (c *Client) ConfigGetEffective(key string) (string, error) {
+	out, err := c.run("config", "--get", key)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			// exit 1: key does not exist at any level
+			return "", nil
+		}
+		return "", fmt.Errorf("git config get %s: %w", key, err)
+	}
+	return strings.TrimRight(out, "\n"), nil
+}
+
 // ConfigUnset removes a local git config key.
 // Returns nil if the key is not set.
 func (c *Client) ConfigUnset(key string) error {
