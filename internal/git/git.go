@@ -70,6 +70,52 @@ func (c *Client) ConfigGetEffective(key string) (string, error) {
 	return strings.TrimRight(out, "\n"), nil
 }
 
+// ConfigSetGlobal sets a global git config key to value.
+func ConfigSetGlobal(key, value string) error {
+	cmd := exec.Command("git", "config", "--global", key, value)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git config global set %s: %w\n%s", key, err, strings.TrimSpace(buf.String()))
+	}
+	return nil
+}
+
+// ConfigGetGlobal reads a global git config value.
+// Returns "", nil if the key is not set.
+func ConfigGetGlobal(key string) (string, error) {
+	cmd := exec.Command("git", "config", "--global", "--get", key)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil // key does not exist at global level
+		}
+		return "", fmt.Errorf("git config global get %s: %w", key, err)
+	}
+	return strings.TrimRight(buf.String(), "\n"), nil
+}
+
+// ConfigUnsetGlobal removes a global git config key.
+// Returns nil if the key is not set.
+func ConfigUnsetGlobal(key string) error {
+	cmd := exec.Command("git", "config", "--global", "--unset", key)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 {
+			return nil // key does not exist
+		}
+		return fmt.Errorf("git config global unset %s: %w\n%s", key, err, strings.TrimSpace(buf.String()))
+	}
+	return nil
+}
+
 // ConfigUnset removes a local git config key.
 // Returns nil if the key is not set.
 func (c *Client) ConfigUnset(key string) error {

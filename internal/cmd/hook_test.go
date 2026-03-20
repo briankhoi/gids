@@ -2,6 +2,7 @@ package cmd_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,13 @@ import (
 	"gids/internal/git"
 	"gids/internal/testutil"
 )
+
+// isolateGitConfig redirects git global config reads/writes to a temporary file
+// so tests never touch the developer's real ~/.gitconfig.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+}
 
 // --- gids hook <shell> ---
 
@@ -54,12 +62,14 @@ func TestHookUnknownShell_ReturnsError(t *testing.T) {
 }
 
 func TestHookInstall_DetectsShellFromEnv(t *testing.T) {
+	isolateGitConfig(t)
 	t.Setenv("SHELL", "/usr/bin/zsh")
 	dir := t.TempDir()
 	file := filepath.Join(dir, ".zshrc")
+	hooksDir := t.TempDir()
 
 	// No --shell flag — must auto-detect from $SHELL.
-	_, err := execute("hook", "install", "--file", file)
+	_, err := execute("hook", "install", "--file", file, "--git-hooks-dir", hooksDir)
 	if err != nil {
 		t.Fatalf("unexpected error with auto-detected shell: %v", err)
 	}
@@ -89,10 +99,12 @@ func TestHookInstall_NoShellEnv_ReturnsError(t *testing.T) {
 // --- gids hook install ---
 
 func TestHookInstall_CreatesFile(t *testing.T) {
+	isolateGitConfig(t)
 	dir := t.TempDir()
 	file := filepath.Join(dir, ".zshrc")
+	hooksDir := t.TempDir()
 
-	out, err := execute("hook", "install", "--shell", "zsh", "--file", file)
+	out, err := execute("hook", "install", "--shell", "zsh", "--file", file, "--git-hooks-dir", hooksDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -110,14 +122,16 @@ func TestHookInstall_CreatesFile(t *testing.T) {
 }
 
 func TestHookInstall_PreservesExistingContent(t *testing.T) {
+	isolateGitConfig(t)
 	dir := t.TempDir()
 	file := filepath.Join(dir, ".zshrc")
 	existing := "export PATH=/usr/local/bin:$PATH\n"
 	if err := os.WriteFile(file, []byte(existing), 0o644); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
+	hooksDir := t.TempDir()
 
-	_, err := execute("hook", "install", "--shell", "zsh", "--file", file)
+	_, err := execute("hook", "install", "--shell", "zsh", "--file", file, "--git-hooks-dir", hooksDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -135,14 +149,16 @@ func TestHookInstall_PreservesExistingContent(t *testing.T) {
 }
 
 func TestHookInstall_Idempotent(t *testing.T) {
+	isolateGitConfig(t)
 	dir := t.TempDir()
 	file := filepath.Join(dir, ".zshrc")
+	hooksDir := t.TempDir()
 
-	if _, err := execute("hook", "install", "--shell", "zsh", "--file", file); err != nil {
+	if _, err := execute("hook", "install", "--shell", "zsh", "--file", file, "--git-hooks-dir", hooksDir); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 
-	out, err := execute("hook", "install", "--shell", "zsh", "--file", file)
+	out, err := execute("hook", "install", "--shell", "zsh", "--file", file, "--git-hooks-dir", hooksDir)
 	if err != nil {
 		t.Fatalf("second install: %v", err)
 	}
@@ -162,10 +178,12 @@ func TestHookInstall_Idempotent(t *testing.T) {
 // --- gids hook uninstall ---
 
 func TestHookUninstall_RemovesBlock(t *testing.T) {
+	isolateGitConfig(t)
 	dir := t.TempDir()
 	file := filepath.Join(dir, ".zshrc")
+	hooksDir := t.TempDir()
 
-	if _, err := execute("hook", "install", "--shell", "zsh", "--file", file); err != nil {
+	if _, err := execute("hook", "install", "--shell", "zsh", "--file", file, "--git-hooks-dir", hooksDir); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -187,6 +205,7 @@ func TestHookUninstall_RemovesBlock(t *testing.T) {
 }
 
 func TestHookUninstall_NoopWhenNotInstalled(t *testing.T) {
+	isolateGitConfig(t)
 	dir := t.TempDir()
 	file := filepath.Join(dir, ".zshrc")
 	if err := os.WriteFile(file, []byte("# regular config\n"), 0o644); err != nil {
@@ -203,6 +222,7 @@ func TestHookUninstall_NoopWhenNotInstalled(t *testing.T) {
 }
 
 func TestHookUninstall_MissingFile_ReportsNotInstalled(t *testing.T) {
+	isolateGitConfig(t)
 	dir := t.TempDir()
 	file := filepath.Join(dir, "nonexistent.zshrc")
 
@@ -297,5 +317,156 @@ func TestCheck_RulePointsToDeletedProfile_Silent(t *testing.T) {
 	}
 	if out != "" {
 		t.Errorf("expected silent output for missing profile, got: %q", out)
+	}
+}
+
+// --- git pre-commit hook (install/uninstall) ---
+
+// TestHookInstall_WritesPreCommitScript verifies that hook install writes an
+// executable pre-commit script containing "gids guard".
+func TestHookInstall_WritesPreCommitScript(t *testing.T) {
+	isolateGitConfig(t)
+	hooksDir := t.TempDir()
+	shellFile := filepath.Join(t.TempDir(), ".zshrc")
+
+	_, err := execute("hook", "install", "--shell", "zsh", "--file", shellFile, "--git-hooks-dir", hooksDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	hookPath := filepath.Join(hooksDir, "pre-commit")
+	content, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("reading pre-commit script: %v", err)
+	}
+	if !strings.Contains(string(content), "gids guard") {
+		t.Errorf("pre-commit script missing 'gids guard', got: %s", string(content))
+	}
+
+	info, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("stat pre-commit: %v", err)
+	}
+	if info.Mode()&0o100 == 0 {
+		t.Errorf("pre-commit script not executable: mode %v", info.Mode())
+	}
+}
+
+// TestHookInstall_SetsGlobalHooksPath verifies that hook install sets
+// core.hooksPath in the global git config.
+func TestHookInstall_SetsGlobalHooksPath(t *testing.T) {
+	isolateGitConfig(t)
+	hooksDir := t.TempDir()
+	shellFile := filepath.Join(t.TempDir(), ".zshrc")
+
+	_, err := execute("hook", "install", "--shell", "zsh", "--file", shellFile, "--git-hooks-dir", hooksDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := git.ConfigGetGlobal("core.hooksPath")
+	if err != nil {
+		t.Fatalf("ConfigGetGlobal: %v", err)
+	}
+	if got != hooksDir {
+		t.Errorf("core.hooksPath = %q, want %q", got, hooksDir)
+	}
+}
+
+// TestHookInstall_GitHook_Idempotent verifies that running hook install twice
+// succeeds without error and leaves exactly one pre-commit script.
+func TestHookInstall_GitHook_Idempotent(t *testing.T) {
+	isolateGitConfig(t)
+	hooksDir := t.TempDir()
+	shellFile := filepath.Join(t.TempDir(), ".zshrc")
+
+	for i := range 2 {
+		if _, err := execute("hook", "install", "--shell", "zsh", "--file", shellFile, "--git-hooks-dir", hooksDir); err != nil {
+			t.Fatalf("install #%d: %v", i+1, err)
+		}
+	}
+
+	entries, err := os.ReadDir(hooksDir)
+	if err != nil {
+		t.Fatalf("reading hooks dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "pre-commit" {
+		t.Errorf("expected exactly one pre-commit file, got: %v", entries)
+	}
+}
+
+// TestHookUninstall_UnsetsGlobalHooksPath verifies that hook uninstall removes
+// core.hooksPath from the global git config.
+func TestHookUninstall_UnsetsGlobalHooksPath(t *testing.T) {
+	isolateGitConfig(t)
+	hooksDir := t.TempDir()
+	shellFile := filepath.Join(t.TempDir(), ".zshrc")
+
+	if _, err := execute("hook", "install", "--shell", "zsh", "--file", shellFile, "--git-hooks-dir", hooksDir); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if _, err := execute("hook", "uninstall", "--shell", "zsh", "--file", shellFile); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+
+	got, err := git.ConfigGetGlobal("core.hooksPath")
+	if err != nil {
+		t.Fatalf("ConfigGetGlobal: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected core.hooksPath to be unset, got %q", got)
+	}
+}
+
+// TestHookUninstall_HooksPathNotSet_NoError verifies that uninstalling when the
+// git hook was never installed does not return an error.
+func TestHookUninstall_HooksPathNotSet_NoError(t *testing.T) {
+	isolateGitConfig(t)
+	shellFile := filepath.Join(t.TempDir(), ".zshrc")
+	if err := os.WriteFile(shellFile, []byte("# regular config\n"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	_, err := execute("hook", "uninstall", "--shell", "zsh", "--file", shellFile)
+	if err != nil {
+		t.Fatalf("unexpected error when uninstalling without prior install: %v", err)
+	}
+}
+
+// TestHookInstall_RunsGidGuardScript verifies the pre-commit script invokes git
+// using a shell shebang so it's callable by git's hook runner.
+func TestHookInstall_PreCommitScriptHasShebang(t *testing.T) {
+	isolateGitConfig(t)
+	hooksDir := t.TempDir()
+	shellFile := filepath.Join(t.TempDir(), ".zshrc")
+
+	_, err := execute("hook", "install", "--shell", "zsh", "--file", shellFile, "--git-hooks-dir", hooksDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(hooksDir, "pre-commit"))
+	if err != nil {
+		t.Fatalf("reading pre-commit: %v", err)
+	}
+	if !strings.HasPrefix(string(content), "#!/") {
+		t.Errorf("pre-commit script missing shebang line, got: %s", string(content))
+	}
+}
+
+// verifyHooksPathViaGitCmd reads core.hooksPath using a raw exec.Command to
+// confirm the value is visible to the real git binary (not just via our package).
+func verifyHooksPathViaGitCmd(t *testing.T, want string) {
+	t.Helper()
+	out, err := exec.Command("git", "config", "--global", "--get", "core.hooksPath").Output()
+	if err != nil {
+		if want == "" {
+			return // expected not set
+		}
+		t.Fatalf("git config --global --get core.hooksPath: %v", err)
+	}
+	got := strings.TrimRight(string(out), "\n")
+	if got != want {
+		t.Errorf("core.hooksPath = %q, want %q", got, want)
 	}
 }

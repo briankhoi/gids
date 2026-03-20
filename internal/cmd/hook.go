@@ -13,6 +13,41 @@ import (
 	"gids/internal/git"
 )
 
+// preCommitScript returns the content for the git pre-commit hook script.
+func preCommitScript() string {
+	return "#!/bin/sh\ngids guard\n"
+}
+
+// defaultHooksDir returns the path to the gids-managed git hooks directory.
+func defaultHooksDir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "gids", "hooks"), nil
+}
+
+// installGitHook creates the hooks directory, writes the pre-commit script, and
+// sets core.hooksPath in the global git config.
+func installGitHook(hooksDir string) error {
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return fmt.Errorf("creating hooks directory: %w", err)
+	}
+	hookPath := filepath.Join(hooksDir, "pre-commit")
+	if err := os.WriteFile(hookPath, []byte(preCommitScript()), 0o755); err != nil {
+		return fmt.Errorf("writing pre-commit hook: %w", err)
+	}
+	if err := git.ConfigSetGlobal("core.hooksPath", hooksDir); err != nil {
+		return fmt.Errorf("setting core.hooksPath: %w", err)
+	}
+	return nil
+}
+
+// uninstallGitHook unsets core.hooksPath from the global git config.
+func uninstallGitHook() error {
+	return git.ConfigUnsetGlobal("core.hooksPath")
+}
+
 const (
 	hookBeginMarker = "# gids:hook:begin"
 	hookEndMarker   = "# gids:hook:end"
@@ -153,7 +188,7 @@ To let gids manage the hook automatically:
 }
 
 func newHookInstallCmd() *cobra.Command {
-	var shell, file string
+	var shell, file, gitHooksDir string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -187,27 +222,37 @@ func newHookInstallCmd() *cobra.Command {
 			content := string(existing)
 
 			if hookInstalled(content) {
-				fmt.Fprintf(cmd.OutOrStdout(), "Hook already installed in %s.\n", tildify(file))
-				return nil
+				fmt.Fprintf(cmd.OutOrStdout(), "Shell hook already installed in %s.\n", tildify(file))
+			} else {
+				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+					return fmt.Errorf("creating directory: %w", err)
+				}
+				updated := addHook(content, script)
+				if err := os.WriteFile(file, []byte(updated), 0o644); err != nil {
+					return fmt.Errorf("writing %s: %w", tildify(file), err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Shell hook installed in %s.\n", tildify(file))
+				fmt.Fprintf(cmd.OutOrStdout(), "Restart your shell or run: source %s\n", tildify(file))
 			}
 
-			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-				return fmt.Errorf("creating directory: %w", err)
+			if gitHooksDir == "" {
+				gitHooksDir, err = defaultHooksDir()
+				if err != nil {
+					return fmt.Errorf("resolving hooks directory: %w", err)
+				}
 			}
-
-			updated := addHook(content, script)
-			if err := os.WriteFile(file, []byte(updated), 0o644); err != nil {
-				return fmt.Errorf("writing %s: %w", tildify(file), err)
+			if err := installGitHook(gitHooksDir); err != nil {
+				return fmt.Errorf("installing git pre-commit hook: %w", err)
 			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Hook installed in %s.\n", tildify(file))
-			fmt.Fprintf(cmd.OutOrStdout(), "Restart your shell or run: source %s\n", tildify(file))
+			fmt.Fprintf(cmd.OutOrStdout(), "Pre-commit hook installed at %s.\n", tildify(gitHooksDir))
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&shell, "shell", "", "shell type (default: detect from $SHELL)")
 	cmd.Flags().StringVar(&file, "file", "", "shell config file (default: auto-detect per shell)")
+	cmd.Flags().StringVar(&gitHooksDir, "git-hooks-dir", "", "git hooks directory (default: $UserConfigDir/gids/hooks)")
+	cmd.Flags().MarkHidden("git-hooks-dir") //nolint:errcheck
 	return cmd
 }
 
@@ -238,24 +283,26 @@ func newHookUninstallCmd() *cobra.Command {
 			existing, err := os.ReadFile(file)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					fmt.Fprintf(cmd.OutOrStdout(), "Hook not installed (%s does not exist).\n", tildify(file))
-					return nil
+					fmt.Fprintf(cmd.OutOrStdout(), "Shell hook not installed (%s does not exist).\n", tildify(file))
+				} else {
+					return fmt.Errorf("reading %s: %w", tildify(file), err)
 				}
-				return fmt.Errorf("reading %s: %w", tildify(file), err)
+			} else {
+				content := string(existing)
+				if !hookInstalled(content) {
+					fmt.Fprintf(cmd.OutOrStdout(), "Shell hook not installed in %s.\n", tildify(file))
+				} else {
+					updated := removeHook(content)
+					if err := os.WriteFile(file, []byte(updated), 0o644); err != nil {
+						return fmt.Errorf("writing %s: %w", tildify(file), err)
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "Shell hook removed from %s.\n", tildify(file))
+				}
 			}
-			content := string(existing)
 
-			if !hookInstalled(content) {
-				fmt.Fprintf(cmd.OutOrStdout(), "Hook not installed in %s.\n", tildify(file))
-				return nil
+			if err := uninstallGitHook(); err != nil {
+				return fmt.Errorf("removing git pre-commit hook: %w", err)
 			}
-
-			updated := removeHook(content)
-			if err := os.WriteFile(file, []byte(updated), 0o644); err != nil {
-				return fmt.Errorf("writing %s: %w", tildify(file), err)
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Hook removed from %s.\n", tildify(file))
 			return nil
 		},
 	}
