@@ -385,6 +385,38 @@ func TestApply_SSHKey_Tilde(t *testing.T) {
 	assertConfigEquals(t, c, "core.sshCommand", want)
 }
 
+// --- ConfigGetEffective ---
+
+// initRepoUserName is the user.name value seeded by initRepo.
+// Defined here so ConfigGetEffective tests stay in sync with initRepo's setup.
+const initRepoUserName = "Test"
+
+func TestConfigGetEffective_ReadsLocalValue(t *testing.T) {
+	dir := initRepo(t) // seeds user.name = initRepoUserName locally
+	c := git.New(dir)
+
+	got, err := c.ConfigGetEffective("user.name")
+	if err != nil {
+		t.Fatalf("ConfigGetEffective: %v", err)
+	}
+	if got != initRepoUserName {
+		t.Errorf("ConfigGetEffective(user.name) = %q, want %q", got, initRepoUserName)
+	}
+}
+
+func TestConfigGetEffective_UnsetKey_ReturnsEmpty(t *testing.T) {
+	dir := initRepo(t)
+	c := git.New(dir)
+
+	got, err := c.ConfigGetEffective("core.sshCommand")
+	if err != nil {
+		t.Fatalf("ConfigGetEffective on unset key: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty string for unset key, got %q", got)
+	}
+}
+
 // --- Error paths ---
 
 // TestApply_ErrorPropagates verifies that Apply surfaces the underlying git error
