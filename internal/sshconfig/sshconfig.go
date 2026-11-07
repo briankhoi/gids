@@ -114,3 +114,18 @@ func ParseFile(path string) ([]Host, error) {
 	}
 	return hosts, nil
 }
+
+// Filter keeps hosts whose pattern contains substr (case-insensitive); an
+// empty substr keeps all.
+func Filter(hosts []Host, substr string) []Host {
+	if substr == "" {
+		return hosts
+	}
+	var out []Host
+	for _, h := range hosts {
+		if strings.Contains(strings.ToLower(h.Pattern), strings.ToLower(substr)) {
+			out = append(out, h)
+		}
+	}
+	return out
+}

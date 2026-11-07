@@ -180,3 +180,22 @@ const (
 	key1         = "~/.ssh/id_example"
 	key2         = "~/.ssh/id_personal"
 )
+
+func TestFilter(t *testing.T) {
+	hosts := []sshconfig.Host{{Pattern: "github-work"}, {Pattern: "GitHub-Personal"}, {Pattern: "vps"}}
+	names := func(hs []sshconfig.Host) (out []string) {
+		for _, h := range hs {
+			out = append(out, h.Pattern)
+		}
+		return out
+	}
+	if got := names(sshconfig.Filter(hosts, "")); len(got) != 3 {
+		t.Errorf("empty filter must keep all: %v", got)
+	}
+	if got := names(sshconfig.Filter(hosts, "GITHUB")); len(got) != 2 || got[0] != "github-work" || got[1] != "GitHub-Personal" {
+		t.Errorf("case-insensitive, order kept: %v", got)
+	}
+	if got := sshconfig.Filter(hosts, "nope"); len(got) != 0 {
+		t.Errorf("no match: %v", got)
+	}
+}

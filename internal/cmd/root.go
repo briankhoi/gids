@@ -87,6 +87,7 @@ Get started:
 	add(newInstallCmd(c), "no")
 	add(newUninstallCmd(c), "no")
 	add(newHookExecCmd(c), "no")
+	add(newProfileCmd(c), "")
 	add(newRuleCmd(c), "")
 	for _, sub := range root.Commands() {
 		inheritAnnotations(sub)
