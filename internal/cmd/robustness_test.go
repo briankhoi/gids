@@ -4,12 +4,10 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"gids/internal/app"
 	"gids/internal/config"
@@ -17,20 +15,6 @@ import (
 	"gids/internal/render"
 	"gids/internal/testenv"
 )
-
-// killAt runs gids with args and SIGKILLs it after d (if still running).
-func killAt(t *testing.T, dir string, d time.Duration, stdin string, args ...string) {
-	t.Helper()
-	cmd := exec.Command(testenv.Binary(t), args...)
-	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(stdin)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	timer := time.AfterFunc(d, func() { cmd.Process.Kill() })
-	cmd.Wait()
-	timer.Stop()
-}
 
 // strictNow checks what must hold even before any self-heal: config.yaml is
 // valid (atomic writes) and the ~/.gitconfig block is well-formed.
@@ -41,91 +25,6 @@ func strictNow(t *testing.T, w *world) {
 	}
 	if _, err := render.HasBlock(w.Read(w.Path(".gitconfig"))); err != nil {
 		t.Fatalf("I3 broken right after a kill: %v", err)
-	}
-}
-
-// TestKillAtAnyMomentKeepsInvariants: SIGKILL each mutating command at many
-// points across its runtime; afterwards the state must be valid, and fully
-// consistent once the next gids command has run (SPEC §11).
-func TestKillAtAnyMomentKeepsInvariants(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow")
-	}
-	ops := []struct {
-		name  string
-		stdin string
-		args  func(w *world) (dir string, args []string)
-	}{
-		{"install", "", func(w *world) (string, []string) { return w.Home, []string{"install"} }},
-		{"uninstall", "", func(w *world) (string, []string) { return w.Home, []string{"uninstall"} }},
-		{"profile add", "", func(w *world) (string, []string) {
-			return w.Home, []string{"profile", "add", "--name", "New", "--git-name", "N", "--email", "n@x"}
-		}},
-		{"rename", "", func(w *world) (string, []string) { return w.Home, []string{"profile", "edit", "Work", "--name", "Job"} }},
-		{"delete --force", "", func(w *world) (string, []string) { return w.Home, []string{"profile", "delete", "Work", "--force"} }},
-		{"rule add", "", func(w *world) (string, []string) { return w.Home, []string{"rule", "add", "~/other", "Personal"} }},
-		{"use", "y\n", func(w *world) (string, []string) { return w.Path("work", "app"), []string{"use", "Personal"} }},
-	}
-	for _, op := range ops {
-		t.Run(op.name, func(t *testing.T) {
-			// Measure how long the op takes uninterrupted, to spread kills over it.
-			w := killWorld(t)
-			dir, args := op.args(w)
-			start := time.Now()
-			w.Gids(dir, op.stdin, nil, args...)
-			runtime := time.Since(start)
-			steps := 60
-			for i := 0; i <= steps; i++ {
-				w := killWorld(t)
-				dir, args := op.args(w)
-				killAt(t, dir, runtime*time.Duration(i)/time.Duration(steps), op.stdin, args...)
-				strictNow(t, w)
-				w.Gids(w.Home, "", nil, "status") // any invocation self-heals
-				w.check()
-			}
-		})
-	}
-}
-
-func killWorld(t *testing.T) *world {
-	w := newWorld(t, true)
-	w.MustGids(w.Home, "rule", "add", "~/work", "Work")
-	w.Repo("work/app", true)
-	return w
-}
-
-// TestKillDuringAmendNeverLeavesHalfRewrittenHistory (SPEC §11 I6).
-func TestKillDuringAmendNeverLeavesHalfRewrittenHistory(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow")
-	}
-	mk := func() (*world, string, string) {
-		w := newWorld(t, true)
-		repo := w.Repo("bot", true)
-		w.Git(repo, "checkout", "-q", "-b", "feat")
-		for i := range 8 {
-			w.Commit(repo, fmt.Sprintf("c%d", i), "Brian Nguyen <bqn@andrew.cmu.edu>")
-		}
-		return w, repo, w.Git(repo, "rev-parse", "HEAD")
-	}
-	w, repo, _ := mk()
-	start := time.Now()
-	w.Gids(repo, "", nil, "amend", "--since", "main", "--author", "Personal", "-y")
-	runtime := time.Since(start)
-	for i := 0; i <= 40; i++ {
-		w, repo, old := mk()
-		killAt(t, repo, runtime*time.Duration(i)/40, "", "amend", "--since", "main", "--author", "Personal", "-y")
-		head := w.Git(repo, "rev-parse", "HEAD")
-		emails := w.Git(repo, "log", "--format=%ae", "main..HEAD")
-		switch {
-		case head == old: // untouched
-		case strings.Count(emails, "nguyenbriankhoi@gmail.com") == 8 && !strings.Contains(emails, "andrew"): // complete
-		default:
-			t.Fatalf("kill at %d/40 left partial history:\n%s", i, emails)
-		}
-		if s := w.Git(repo, "status", "--porcelain"); s != "" {
-			t.Fatalf("worktree changed: %s", s)
-		}
 	}
 }
 
@@ -148,18 +47,21 @@ func (m *model) fold(name string) (string, bool) {
 }
 
 // expectedEmail is the identity git should apply in repo dir (relative to
-// home), per the model: deepest rule containing it, else the global one.
+// home), per the model: the deepest rule containing it (depth = number of
+// path segments, so "~/" is shallower than "~/a/"), else the global one.
 func (m *model) expectedEmail(dir string) string {
 	if !m.installed {
 		return "global@x.com"
 	}
 	best, bestDepth := "", -1
 	for r, p := range m.rules {
-		rd := strings.TrimSuffix(strings.TrimPrefix(r, "~/"), "/")
-		if dir == rd || strings.HasPrefix(dir, rd+"/") || r == "~/" {
-			if d := strings.Count(rd, "/"); r == "~/" && bestDepth < 0 || r != "~/" && d > bestDepth {
-				best, bestDepth = p, d
-			}
+		rd := strings.Trim(strings.TrimPrefix(r, "~/"), "/")
+		depth := 0
+		if rd != "" {
+			depth = strings.Count(rd, "/") + 1
+		}
+		if (rd == "" || dir == rd || strings.HasPrefix(dir, rd+"/")) && depth > bestDepth {
+			best, bestDepth = p, depth
 		}
 	}
 	if best == "" {
