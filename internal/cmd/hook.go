@@ -43,6 +43,12 @@ func newHookExecCmd(c *cli) *cobra.Command {
 			switch args[0] {
 			case "pre-commit":
 				code = h.preCommit()
+			case "commit-msg":
+				if len(args) > 1 {
+					h.commitMsg(args[1])
+				}
+			case "post-commit":
+				h.postCommit()
 			}
 			if code != 0 {
 				return exitError{code}
@@ -312,3 +318,42 @@ func (h *hookRun) unmapped(u *ui.UI, cfg *config.Config, repo git.Repo, name, em
 
 // withUI returns a copy of c that talks through u (the terminal, in hooks).
 func (c *cli) withUI(u *ui.UI) *cli { cp := *c; cp.ui = u; return &cp }
+
+// commitMsg appends the session's Co-authored-by trailers (SPEC §9.1). It
+// leaves an empty message alone so git still aborts it (PROGRESS.md D1).
+func (h *hookRun) commitMsg(file string) {
+	authors, err := h.g.ConfigGetAll("gids.coauthor")
+	if err != nil || len(authors) == 0 {
+		return
+	}
+	msg, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+	stripped, err := h.g.RunInput(string(msg), "stripspace", "--strip-comments")
+	if err != nil || strings.TrimSpace(stripped) == "" {
+		return
+	}
+	args := []string{"interpret-trailers", "--in-place", "--if-exists", "addIfDifferent"}
+	for _, a := range authors {
+		if validCoauthor(a) {
+			args = append(args, "--trailer", "Co-authored-by: "+a)
+		}
+	}
+	if _, err := h.g.Run(append(args, file)...); err != nil {
+		h.note("couldn't add co-authors: %v", err)
+	}
+}
+
+// postCommit ends a --once pairing session after a successful commit.
+func (h *hookRun) postCommit() {
+	once, _, _ := h.g.ConfigGet("gids.coauthorOnce", "--local", "--type=bool")
+	if once != "true" {
+		return
+	}
+	if err := clearSession(h.g); err != nil {
+		h.note("couldn't clear one-time co-authors: %v", err)
+		return
+	}
+	h.note("one-time co-authors cleared")
+}
