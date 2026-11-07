@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"gids/internal/testhook"
 )
 
 // Client runs git in Dir with extra environment variables.
@@ -57,6 +59,7 @@ func (c Client) RunRaw(stdin string, args ...string) (string, error) { return c.
 
 // exec runs git and returns stdout exactly as written.
 func (c Client) exec(stdin string, args ...string) (string, error) {
+	testhook.Point("git", strings.Join(args, " "))
 	cmd := exec.Command("git", args...)
 	cmd.Dir = c.Dir
 	cmd.Env = append(os.Environ(), c.Env...)

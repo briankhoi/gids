@@ -176,7 +176,7 @@ func (e *Env) sync(files []render.File) ([]string, error) {
 			return changed, err
 		}
 		if statErr == nil && fi.Mode().Perm() != perm { // WriteAtomic keeps old perms
-			if err := os.Chmod(file, perm); err != nil {
+			if err := fsx.Chmod(file, perm); err != nil {
 				return changed, err
 			}
 		}
@@ -206,7 +206,7 @@ func (e *Env) sync(files []render.File) ([]string, error) {
 			}
 		}
 		if sub != "" && len(files) == 0 {
-			os.Remove(filepath.Join(dir, sub)) // only succeeds if empty
+			fsx.RemoveDirIfEmpty(filepath.Join(dir, sub))
 		}
 	}
 	sort.Strings(changed)

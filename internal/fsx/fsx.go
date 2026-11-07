@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gids/internal/testhook"
 )
 
 // TempPrefix marks gids' temporary files so leftovers from a killed process
@@ -56,9 +58,11 @@ func WriteAtomic(path string, data []byte, perm fs.FileMode) error {
 		perm = fi.Mode().Perm()
 	}
 	dir := filepath.Dir(target)
+	testhook.Point("mkdir", dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	testhook.Point("create-temp", target)
 	tmp, err := os.CreateTemp(dir, TempPrefix+filepath.Base(target)+"-*")
 	if err != nil {
 		return err
@@ -71,6 +75,7 @@ func WriteAtomic(path string, data []byte, perm fs.FileMode) error {
 			os.Remove(tmpName)
 		}
 	}()
+	testhook.Point("write-temp", target)
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
@@ -83,6 +88,7 @@ func WriteAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	testhook.Point("rename", target)
 	if err := os.Rename(tmpName, target); err != nil {
 		return err
 	}
@@ -93,6 +99,7 @@ func WriteAtomic(path string, data []byte, perm fs.FileMode) error {
 
 // Remove deletes path if it exists (a missing file is not an error).
 func Remove(path string) error {
+	testhook.Point("remove", path)
 	err := os.Remove(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -101,6 +108,21 @@ func Remove(path string) error {
 		syncDir(filepath.Dir(path))
 	}
 	return err
+}
+
+// Chmod sets path's permission bits.
+func Chmod(path string, perm fs.FileMode) error {
+	testhook.Point("chmod", path)
+	return os.Chmod(path, perm)
+}
+
+// RemoveDirIfEmpty removes dir only if it is empty (best effort: anything
+// else, including "not empty", is ignored).
+func RemoveDirIfEmpty(dir string) {
+	testhook.Point("rmdir", dir)
+	if os.Remove(dir) == nil {
+		syncDir(filepath.Dir(dir))
+	}
 }
 
 // IsTemp reports whether name (a base name) is a leftover gids temp file.

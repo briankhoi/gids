@@ -66,6 +66,7 @@ var leakedGitVars = []string{
 	"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
 	"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_EDITOR",
 	"GIDS_TTY", "GIDS_SKIP_HOOKS", "EMAIL",
+	"GIDS_TEST_CRASH_AT", "GIDS_TEST_TRACE", "GIDS_TEST_NO_LOCK",
 }
 
 // Main isolates a whole test binary: call it from TestMain. It points HOME
@@ -263,7 +264,9 @@ func Binary(t testing.TB) string {
 			buildErr = err
 			return
 		}
-		cmd := exec.Command("go", "build", "-o", binPath, ".")
+		// -tags gidstest compiles in internal/testhook (crash points, traces);
+		// with its GIDS_TEST_* variables unset it behaves like a release build.
+		cmd := exec.Command("go", "build", "-tags", "gidstest", "-o", binPath, ".")
 		cmd.Dir = root
 		cmd.Env = buildEnv
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -314,6 +317,76 @@ func (s *Sandbox) run(stdout, stderr io.Writer, stdin io.Reader, dir string, env
 		s.T.Fatal(err)
 	}
 	return 0
+}
+
+// Proc is a gids process started with Start.
+type Proc struct {
+	s         *Sandbox
+	cmd       *exec.Cmd
+	cancel    context.CancelFunc
+	out, errb bytes.Buffer
+	done      *Result
+}
+
+// Start runs gids in the background (own process group, killed after
+// Timeout). Wait for it with Wait.
+func (s *Sandbox) Start(dir string, env []string, args ...string) *Proc {
+	s.T.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	p := &Proc{s: s, cancel: cancel}
+	p.cmd = exec.CommandContext(ctx, Binary(s.T), args...)
+	p.cmd.Dir, p.cmd.Env = dir, append(os.Environ(), env...)
+	p.cmd.Stdout, p.cmd.Stderr = &p.out, &p.errb
+	p.cmd.WaitDelay = 5 * time.Second
+	ownGroup(p.cmd)
+	if err := p.cmd.Start(); err != nil {
+		cancel()
+		s.T.Fatal(err)
+	}
+	s.T.Cleanup(func() { // never leave it running
+		if p.done == nil {
+			cancel()
+			p.cmd.Wait()
+		}
+	})
+	return p
+}
+
+// Wait waits for the process and returns its result (Code -1 if killed).
+// Calling it again returns the same result.
+func (p *Proc) Wait() Result {
+	p.s.T.Helper()
+	if p.done != nil {
+		return *p.done
+	}
+	defer p.cancel()
+	err := p.cmd.Wait()
+	var ee *exec.ExitError
+	code := 0
+	switch {
+	case errors.As(err, &ee):
+		code = ee.ExitCode()
+	case err != nil:
+		p.s.T.Fatal(err)
+	}
+	p.done = &Result{Out: p.out.String(), Err: p.errb.String(), Code: code}
+	return *p.done
+}
+
+// WaitFile polls until path exists (an event gate's ".reached" marker),
+// failing the test after Timeout.
+func (s *Sandbox) WaitFile(path string) {
+	s.T.Helper()
+	deadline := time.Now().Add(Timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.T.Fatalf("%s never appeared", path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // Result of running the gids binary.
