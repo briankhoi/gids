@@ -95,8 +95,9 @@ Files: `~/.config/gids/` (or `$XDG_CONFIG_HOME/gids`; `%APPDATA%\gids` on Window
 
 ## Development
 ```sh
-make test        # everything, with -race (incl. kill-injection and pty end-to-end tests)
+make test        # all tests, with -race (incl. crash-at-every-step and pty end-to-end tests)
 make test-short  # skips the slow ones
+make verify      # make test + exhaustive state search + TLA+ models (≈7 min; see verify/README.md)
 make sandbox     # a shell with a throwaway HOME and the built gids, to try things safely
 make vulncheck   # govulncheck on code, modules and the toolchain
 ./examples/demo.sh

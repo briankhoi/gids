@@ -4,7 +4,7 @@ BINARY  := gids
 LDFLAGS_BASE := -X gids/internal/version.version=$(VERSION)
 LDFLAGS_DEV  := -ldflags "$(LDFLAGS_BASE)"
 
-.PHONY: build test test-short test-coverage coverage-html coverage-terminal vet fmt vulncheck sandbox run snapshot
+.PHONY: build test test-short test-coverage coverage-html coverage-terminal vet fmt vulncheck verify sandbox run snapshot
 
 build:
 	@mkdir -p bin
@@ -20,12 +20,18 @@ run:
 test:
 	go test -race ./...
 
-# Skips the slow kill-injection tests.
+# Skips the slow tests (crash at every step).
 test-short:
 	go test -short ./...
 
 fmt:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+# Everything in verify/README.md: the full suite plus the exhaustive state
+# search and the TLA+ models (needs java and verify/tla/tla2tools.jar).
+verify:
+	GIDS_VERIFY=1 go test -race -timeout 30m ./...
+	./verify/tla/run.sh
 
 # No known vulnerabilities in reachable code, any required module, or the toolchain.
 vulncheck:

@@ -38,6 +38,20 @@
   picked another module's minimum). Re-pinned v1.1.24; CI's module scan would catch a
   vulnerable downgrade.
 
+### Found by the verification work (verify/README.md) and fixed
+- **B24 · M · Two gids commands at once could lose an update.** Both load `config.yaml`,
+  and the second save drops the first's change. Found by TLA+ (`files_neg_nolock_lost`)
+  and reproduced deterministically with an event-gated test. Fixed by the cross-process
+  lock (SPEC §7.2). Test: `TestLockPreventsLostUpdates`.
+- **B25 · M · One gids's self-heal could delete another's in-flight temp file,** so that
+  command failed. Same fix. Test: `TestLockProtectsInFlightWrites`.
+- **B26 · M · Self-heal could render from a config loaded before another process
+  changed it,** leaving stale generated files. Found by TLA+ (`files_neg_heal_preload`).
+  `Heal` now loads `config.yaml` itself, under the lock.
+- **B27 · L (accepted) · `with --once` can apply twice** if git is killed between creating
+  the commit and running post-commit. Found by TLA+ (`once_neg_known_gap_postcrash`). It's
+  visible and easy to remove; closing it isn't worth the complexity.
+
 Severity: **C** critical · **H** high · **M** medium · **L** low · **–** cleanup.
 "v2" says what happens to the bug under `SPEC.md` v2. *Gone* means the code goes away.
 

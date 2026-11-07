@@ -524,11 +524,22 @@ helper.
 | I7 | No prompt can wait forever without input, and no prompt can loop forever. |
 | I8 | `install` and `uninstall` are idempotent, and `install` then `uninstall` returns every file and setting it touched to its original bytes and values. |
 
-**How the invariants are tested:**
-- **Exhaustive interruption:** for each mutating command, kill the process (`SIGKILL`) at
-  increasing delays across its whole runtime, hundreds of runs. After each kill, run one
-  more gids command, then `checkInvariants`. This needs no test-only hooks in the
-  production code.
+**How the invariants are tested and proven** (`make verify` runs it all; see `verify/README.md`):
+- **Crash at every step:** test builds (`-tags gidstest`, `internal/testhook`) number every
+  file operation, lock step and git command. `TestCrashAtEveryStep` kills each mutating
+  command at *each* of its steps (`SIGKILL`), checks I1/I3 right away, and checks I1–I4 (I6
+  for amend) after the next gids command. Release builds compile those hooks to empty
+  functions.
+- **Event-gated interleavings:** a test build can pause at an exact step, so two-process
+  races run deterministically, each with the lock disabled as a negative control.
+- **Exhaustive state search:** every state a small domain can reach, with every operation
+  tried from every state, checked against a model and against real git's `includeIf`.
+- **Model checking (TLA+/TLC):** the file protocol, amend, the guard, and `with --once`.
+  Each invariant has a negative control (the model deliberately broken) that TLC must
+  catch. `TestTracesFollowTheModeledProtocol` checks that the real code's step order is
+  the one the models assume.
+- **Static checks:** every file change goes through `fsx` and is a numbered step; the
+  only program run is git; no script does a recursive delete.
 - **Fuzzing** (Go native `testing.F`):
   - *round-trip*: rendering a value and reading it back with
     `git config --file <f> --get` gives the original, for arbitrary strings;
