@@ -328,6 +328,20 @@ including panics.
   target, keep the link and the target's permissions.
 - **Read close to the write.** `config.yaml` is loaded right before a change, never held
   across a prompt, so two terminals can't overwrite each other's edits from minutes earlier.
+- **One writer at a time.** Every change to gids' files (`config.yaml`, the generated files,
+  the `~/.gitconfig` block), including self-heal, holds an OS advisory lock on
+  `~/.config/gids/.lock` from load to last write. So two gids processes at once can't lose
+  an update or delete each other's in-flight temp files. The OS releases the lock if gids
+  dies, so a crash can never leave gids locked. A command waits up to 10 s for another,
+  then errors. Prompts never run under the lock. On a filesystem that can't lock, gids
+  proceeds unlocked. (Proven in `verify/tla/GidsFiles.tla`; tested by
+  `TestLockPreventsLostUpdates` and `TestLockProtectsInFlightWrites`.)
+- **`~/.gitconfig` isn't locked against `git config --global`** (decided). gids writes it
+  only in `install`/`uninstall`, so a collision needs both within milliseconds. The worst
+  case is that one of the two edits is lost (re-run it); the file can't be corrupted,
+  since both write atomically. Taking git's own `.lock` would be worse: if gids were
+  killed mid-write, the stale lock would block every `git config --global` until it was
+  deleted by hand, because git never expires its locks.
 - **Write order:** `config.yaml` first (it's the source of truth), then the generated files.
 - **Self-healing renders.** Every gids invocation, *including the guard*, first checks that
   the generated files equal `render(config.yaml)`, and rewrites them if not. So an

@@ -137,10 +137,33 @@ func (e *Env) desired(cfg *config.Config) ([]render.File, error) {
 }
 
 // Heal makes the generated files exactly equal to what config.yaml implies
-// (SPEC §7.2 self-healing, invariant I2). It returns the relative paths it
-// changed; identity reports whether any of them affects which identity git
-// picks (as opposed to just the hook scripts).
-func (e *Env) Heal(cfg *config.Config) (changed []string, identity bool, err error) {
+// (SPEC §7.2 self-healing, invariant I2). It loads config.yaml itself, under
+// the lock, so it can never heal from a config another process has since
+// replaced. It returns that config, the relative paths it changed, and
+// whether any change affects which identity git picks (as opposed to just
+// the hook scripts).
+func (e *Env) Heal() (cfg *config.Config, changed []string, identity bool, err error) {
+	if _, err := os.Stat(e.Paths.Dir); errors.Is(err, fs.ErrNotExist) {
+		// Nothing generated can exist; only an installed block needs files.
+		if installed, err := e.Installed(); err != nil || !installed {
+			cfg, lerr := e.Load()
+			return cfg, nil, false, errors.Join(err, lerr)
+		}
+	}
+	unlock, err := e.lock()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer unlock()
+	if cfg, err = e.Load(); err != nil {
+		return nil, nil, false, err
+	}
+	changed, identity, err = e.heal(cfg)
+	return cfg, changed, identity, err
+}
+
+// heal is Heal for a caller that already holds the lock.
+func (e *Env) heal(cfg *config.Config) (changed []string, identity bool, err error) {
 	files, err := e.desired(cfg)
 	if err != nil {
 		return nil, false, err
@@ -213,9 +236,15 @@ func (e *Env) sync(files []render.File) ([]string, error) {
 	return changed, nil
 }
 
-// Mutate is the only way commands change config.yaml: load (right before the
-// change, never across a prompt), apply fn, validate+save, then heal.
+// Mutate is the only way commands change config.yaml: under the lock, load
+// (right before the change, never across a prompt), apply fn, validate+save,
+// then heal.
 func (e *Env) Mutate(fn func(cfg *config.Config) error) (*config.Config, error) {
+	unlock, err := e.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	cfg, err := e.Load()
 	if err != nil {
 		return nil, err
@@ -226,7 +255,7 @@ func (e *Env) Mutate(fn func(cfg *config.Config) error) (*config.Config, error) 
 	if err := config.Save(e.Paths.Config, cfg); err != nil {
 		return nil, err
 	}
-	_, _, err = e.Heal(cfg)
+	_, _, err = e.heal(cfg)
 	return cfg, err
 }
 
@@ -236,6 +265,11 @@ func (e *Env) Install() (changedGlobal bool, err error) {
 	if err := e.git().RequireVersion(MinGit[0], MinGit[1]); err != nil {
 		return false, err
 	}
+	unlock, err := e.lock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	cfg, err := e.Load()
 	if err != nil {
 		return false, err
@@ -264,6 +298,11 @@ func (e *Env) Install() (changedGlobal bool, err error) {
 // Uninstall removes the block first (deactivating gids in one atomic write),
 // then the generated files. config.yaml is kept.
 func (e *Env) Uninstall() (changedGlobal bool, err error) {
+	unlock, err := e.lock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	content, exists, err := e.readGlobal()
 	if err != nil {
 		return false, err

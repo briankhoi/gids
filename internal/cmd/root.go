@@ -66,11 +66,7 @@ Get started:
 				return nil
 			}
 			// Self-heal before anything else (SPEC §7.2).
-			cfg, err := env.Load()
-			if err != nil {
-				return err
-			}
-			_, _, err = env.Heal(cfg)
+			_, _, _, err = env.Heal()
 			return err
 		},
 	}

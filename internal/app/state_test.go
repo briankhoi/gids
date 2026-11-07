@@ -111,8 +111,7 @@ func TestHealRepairsTamperingAndStrays(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "profiles", ".gids-tmp-x-123"), []byte("partial"), 0o644)
 	os.Remove(filepath.Join(dir, "hooks", "post-commit"))
 	os.Chmod(filepath.Join(dir, "hooks", "pre-commit"), 0o644)
-	cfg, _ := env.Load()
-	changed, identity, err := env.Heal(cfg)
+	_, changed, identity, err := env.Heal()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,12 +119,12 @@ func TestHealRepairsTamperingAndStrays(t *testing.T) {
 		t.Fatalf("changed=%v identity=%v", changed, identity)
 	}
 	check(t, env)
-	if changed, identity, _ := env.Heal(cfg); len(changed) != 0 || identity {
+	if _, changed, identity, _ := env.Heal(); len(changed) != 0 || identity {
 		t.Fatalf("second heal changed %v", changed)
 	}
 	// Hook-only repairs don't count as identity changes.
 	os.WriteFile(filepath.Join(dir, "hooks", "commit-msg"), []byte("x"), 0o755)
-	if _, identity, _ := env.Heal(cfg); identity {
+	if _, _, identity, _ := env.Heal(); identity {
 		t.Fatal("hook repair flagged as identity change")
 	}
 }
@@ -144,8 +143,7 @@ func TestForeignFilesAreNeverDeleted(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, filepath.FromSlash(f)), []byte("mine"), 0o644)
 	}
 	os.WriteFile(filepath.Join(dir, "profiles", "Ghost.gitconfig"), []byte("stray"), 0o644) // gids-shaped: removed
-	cfg, _ := env.Load()
-	if _, _, err := env.Heal(cfg); err != nil {
+	if _, _, _, err := env.Heal(); err != nil {
 		t.Fatal(err)
 	}
 	check(t, env)
@@ -169,8 +167,7 @@ func TestHealRemovesGeneratedFilesWhenNotInstalled(t *testing.T) {
 	env.Install()
 	// Simulate a crash during uninstall: block removed, files left.
 	os.WriteFile(s.Path(".gitconfig"), nil, 0o644)
-	cfg, _ := env.Load()
-	if _, _, err := env.Heal(cfg); err != nil {
+	if _, _, _, err := env.Heal(); err != nil {
 		t.Fatal(err)
 	}
 	check(t, env)

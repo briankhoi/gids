@@ -119,12 +119,12 @@ func (h *hookRun) commitIdent() (name, email string) {
 // preCommit is the commit guard (SPEC §8). Returns the hook's exit code.
 func (h *hookRun) preCommit() int {
 	env := h.c.env
-	cfg, err := env.Load()
-	if err != nil {
+	cfg, _, identityChanged, err := env.Heal()
+	if cfg == nil {
 		h.note("%v; skipping the identity check", err)
 		return 0
 	}
-	if _, identityChanged, err := env.Heal(cfg); err != nil {
+	if err != nil {
 		h.note("couldn't repair generated config: %v", err)
 	} else if identityChanged {
 		h.note("repaired its generated git config, which can change this commit's identity. Re-run your commit.")

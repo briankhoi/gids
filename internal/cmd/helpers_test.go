@@ -1,6 +1,7 @@
 package cmd_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -95,4 +96,42 @@ func want(t *testing.T, cond bool, format string, a ...any) {
 	if !cond {
 		t.Fatalf(format, a...)
 	}
+}
+
+// restore makes a fresh sandbox holding a copy of the snapshot snap.
+func restore(t *testing.T, snap string) *world {
+	t.Helper()
+	s := testenv.New(t)
+	if err := testenv.CopyTree(snap, s.Home); err != nil {
+		t.Fatal(err)
+	}
+	return &world{s, t}
+}
+
+// snapshot copies w's whole HOME into a new directory that outlives w.
+func snapshot(t *testing.T, w *world, parent string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(parent, "snap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := testenv.CopyTree(w.Home, dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// traceOf runs gids once with a trace and returns its steps.
+func traceOf(t *testing.T, w *world, dir, stdin string, args ...string) ([]testenv.Step, testenv.Result) {
+	t.Helper()
+	return traceEnv(t, w, nil, dir, stdin, args...)
+}
+
+// traceEnv is traceOf with extra environment (which changes the steps, e.g.
+// GIDS_TEST_NO_LOCK removes the lock's).
+func traceEnv(t *testing.T, w *world, env []string, dir, stdin string, args ...string) ([]testenv.Step, testenv.Result) {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "trace")
+	r := w.Gids(dir, stdin, append([]string{"GIDS_TEST_TRACE=" + f}, env...), args...)
+	return testenv.ReadTrace(f), r
 }
