@@ -2,7 +2,7 @@ version: 2
 
 before:
   hooks:
-    - go mod tidy
+    - go mod verify
 
 builds:
   - env:
@@ -20,7 +20,7 @@ builds:
     ldflags:
       - -s
       - -w
-      - -X github.com/briankhoi/gids/internal/version.version={{.Version}}
+      - -X gids/internal/version.version={{.Version}}
     binary: gids
 
 archives:
@@ -72,6 +72,16 @@ release:
     ```
 
     **Windows** — download `gids_{{.Version}}_Windows_x86_64.zip` from the assets below and place `gids.exe` on your `PATH`.
+
+    Verify a download against `checksums.txt` (e.g. `shasum -a 256 -c checksums.txt --ignore-missing`).
+
+    **Then, once per machine:**
+
+    ```sh
+    gids install        # hooks gids into your global git config (undo: gids uninstall)
+    gids profile add    # once per identity
+    gids rule add ~/work Work
+    ```
 
     ---
   footer: |
