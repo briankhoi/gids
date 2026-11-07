@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"gids/internal/sshconfig"
-	"gids/internal/testutil"
 )
 
 func writeTempConfig(t *testing.T, content string) string {
@@ -20,15 +19,15 @@ func writeTempConfig(t *testing.T, content string) string {
 }
 
 func TestParseFile_MultipleHosts(t *testing.T) {
-	content := `Host ` + testutil.SSHHostWork + `
+	content := `Host ` + hostWork + `
   HostName work.example.com
-  User ` + testutil.SSHUser + `
-  IdentityFile ` + testutil.SSHKey + `
+  User ` + sshUser + `
+  IdentityFile ` + key1 + `
 
-Host ` + testutil.SSHHostPersonal + `
+Host ` + hostPersonal + `
   HostName personal.example.com
-  User ` + testutil.SSHUser + `
-  IdentityFile ` + testutil.SSHKey2 + `
+  User ` + sshUser + `
+  IdentityFile ` + key2 + `
 `
 	path := writeTempConfig(t, content)
 
@@ -40,21 +39,21 @@ Host ` + testutil.SSHHostPersonal + `
 		t.Fatalf("expected 2 hosts, got %d", len(hosts))
 	}
 
-	if hosts[0].Pattern != testutil.SSHHostWork {
-		t.Errorf("hosts[0].Pattern = %q, want %q", hosts[0].Pattern, testutil.SSHHostWork)
+	if hosts[0].Pattern != hostWork {
+		t.Errorf("hosts[0].Pattern = %q, want %q", hosts[0].Pattern, hostWork)
 	}
-	if hosts[0].User != testutil.SSHUser {
-		t.Errorf("hosts[0].User = %q, want %q", hosts[0].User, testutil.SSHUser)
+	if hosts[0].User != sshUser {
+		t.Errorf("hosts[0].User = %q, want %q", hosts[0].User, sshUser)
 	}
-	if hosts[0].IdentityFile != testutil.SSHKey {
-		t.Errorf("hosts[0].IdentityFile = %q, want %q", hosts[0].IdentityFile, testutil.SSHKey)
+	if hosts[0].IdentityFile != key1 {
+		t.Errorf("hosts[0].IdentityFile = %q, want %q", hosts[0].IdentityFile, key1)
 	}
 
-	if hosts[1].Pattern != testutil.SSHHostPersonal {
-		t.Errorf("hosts[1].Pattern = %q, want %q", hosts[1].Pattern, testutil.SSHHostPersonal)
+	if hosts[1].Pattern != hostPersonal {
+		t.Errorf("hosts[1].Pattern = %q, want %q", hosts[1].Pattern, hostPersonal)
 	}
-	if hosts[1].IdentityFile != testutil.SSHKey2 {
-		t.Errorf("hosts[1].IdentityFile = %q, want %q", hosts[1].IdentityFile, testutil.SSHKey2)
+	if hosts[1].IdentityFile != key2 {
+		t.Errorf("hosts[1].IdentityFile = %q, want %q", hosts[1].IdentityFile, key2)
 	}
 }
 
@@ -62,8 +61,8 @@ func TestParseFile_SkipsWildcard(t *testing.T) {
 	content := `Host *
   ServerAliveInterval 60
 
-Host ` + testutil.SSHHostWork + `
-  IdentityFile ` + testutil.SSHKey + `
+Host ` + hostWork + `
+  IdentityFile ` + key1 + `
 `
 	path := writeTempConfig(t, content)
 
@@ -74,8 +73,8 @@ Host ` + testutil.SSHHostWork + `
 	if len(hosts) != 1 {
 		t.Fatalf("expected 1 host (wildcard skipped), got %d", len(hosts))
 	}
-	if hosts[0].Pattern != testutil.SSHHostWork {
-		t.Errorf("hosts[0].Pattern = %q, want %q", hosts[0].Pattern, testutil.SSHHostWork)
+	if hosts[0].Pattern != hostWork {
+		t.Errorf("hosts[0].Pattern = %q, want %q", hosts[0].Pattern, hostWork)
 	}
 }
 
@@ -85,8 +84,8 @@ func TestParseFile_SkipsQuestionMarkWildcard(t *testing.T) {
 	content := `Host host?.example.com
   ServerAliveInterval 60
 
-Host ` + testutil.SSHHostWork + `
-  IdentityFile ` + testutil.SSHKey + `
+Host ` + hostWork + `
+  IdentityFile ` + key1 + `
 `
 	path := writeTempConfig(t, content)
 
@@ -97,8 +96,8 @@ Host ` + testutil.SSHHostWork + `
 	if len(hosts) != 1 {
 		t.Fatalf("expected 1 host (? wildcard skipped), got %d: %+v", len(hosts), hosts)
 	}
-	if hosts[0].Pattern != testutil.SSHHostWork {
-		t.Errorf("hosts[0].Pattern = %q, want %q", hosts[0].Pattern, testutil.SSHHostWork)
+	if hosts[0].Pattern != hostWork {
+		t.Errorf("hosts[0].Pattern = %q, want %q", hosts[0].Pattern, hostWork)
 	}
 }
 
@@ -120,9 +119,9 @@ func TestDefaultConfigPaths_ReturnsAbsolutePaths(t *testing.T) {
 }
 
 func TestParseFile_FirstIdentityFileWins(t *testing.T) {
-	content := `Host ` + testutil.SSHHostWork + `
-  IdentityFile ` + testutil.SSHKey + `
-  IdentityFile ` + testutil.SSHKey2 + `
+	content := `Host ` + hostWork + `
+  IdentityFile ` + key1 + `
+  IdentityFile ` + key2 + `
 `
 	path := writeTempConfig(t, content)
 
@@ -133,14 +132,14 @@ func TestParseFile_FirstIdentityFileWins(t *testing.T) {
 	if len(hosts) != 1 {
 		t.Fatalf("expected 1 host, got %d", len(hosts))
 	}
-	if hosts[0].IdentityFile != testutil.SSHKey {
-		t.Errorf("IdentityFile = %q, want first entry %q", hosts[0].IdentityFile, testutil.SSHKey)
+	if hosts[0].IdentityFile != key1 {
+		t.Errorf("IdentityFile = %q, want first entry %q", hosts[0].IdentityFile, key1)
 	}
 }
 
 func TestParseFile_NoIdentityFile(t *testing.T) {
-	content := `Host ` + testutil.SSHHostWork + `
-  User ` + testutil.SSHUser + `
+	content := `Host ` + hostWork + `
+  User ` + sshUser + `
 `
 	path := writeTempConfig(t, content)
 
@@ -173,3 +172,11 @@ func TestParseFile_EmptyConfig(t *testing.T) {
 		t.Errorf("expected 0 hosts, got %d", len(hosts))
 	}
 }
+
+const (
+	hostWork     = "work-server"
+	hostPersonal = "personal-vps"
+	sshUser      = "git"
+	key1         = "~/.ssh/id_example"
+	key2         = "~/.ssh/id_personal"
+)
