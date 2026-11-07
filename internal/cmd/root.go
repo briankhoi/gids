@@ -92,6 +92,7 @@ Get started:
 	add(newUseCmd(c), "")
 	add(newStatusCmd(c), "")
 	add(newWithCmd(c), "")
+	add(newAmendCmd(c), "")
 	for _, sub := range root.Commands() {
 		inheritAnnotations(sub)
 	}
