@@ -89,6 +89,7 @@ Get started:
 	add(newHookExecCmd(c), "no")
 	add(newProfileCmd(c), "")
 	add(newRuleCmd(c), "")
+	add(newStatusCmd(c), "")
 	for _, sub := range root.Commands() {
 		inheritAnnotations(sub)
 	}
