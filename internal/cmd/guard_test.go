@@ -1,405 +1,193 @@
 package cmd_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"gids/internal/config"
-	"gids/internal/git"
-	"gids/internal/testutil"
+	"gids/internal/testenv"
 )
 
-// TestGuard_NotInGitRepo_Silent verifies the guard exits silently when not in a git repo.
-func TestGuard_NotInGitRepo_Silent(t *testing.T) {
-	plainDir := t.TempDir()
-	t.Chdir(plainDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	out, err := execute("guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestMismatchFromLocalOverrideIsFixedThenRerun(t *testing.T) {
+	w := newWorld(t, true)
+	w.MustGids(w.Home, "rule", "add", "~/work", "Work")
+	repo := w.Repo("work/app", true)
+	w.Git(repo, "config", "user.email", "oops@personal.com") // e.g. left by gids v1
+	out, code := w.commit(repo, "y\n")
+	want(t, code == 1, "guard should stop the commit to re-run: %d\n%s", code, out)
+	want(t, strings.Contains(out, "mapped to Work") && strings.Contains(out, ".git/config"), "warning: %s", out)
+	if v, err := w.TryGit(repo, "config", "--local", "user.email"); err == nil {
+		t.Fatalf("local override not removed: %q", v)
 	}
-	if out != "" {
-		t.Errorf("expected silent output for non-git dir, got: %q", out)
-	}
+	_, code = w.commit(repo, "")
+	want(t, code == 0 && w.Author(repo) == workID, "re-run: %d %q", code, w.Author(repo))
+	w.check()
 }
 
-// TestGuard_UnmappedRepo_ShowsCommittingAs verifies the "Committing as" line is shown.
-func TestGuard_UnmappedRepo_ShowsCommittingAs(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitName, testutil.GitEmail)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// Y (is this you?) → N (save rule?)
-	out, err := executeWithInput("y\nn\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	for _, want := range []string{"Committing as", testutil.GitName, testutil.GitEmail} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in output, got: %s", want, out)
-		}
-	}
+func TestMismatchDeclinedCommitsAsIs(t *testing.T) {
+	w := newWorld(t, true)
+	w.MustGids(w.Home, "rule", "add", "~/work", "Work")
+	repo := w.Repo("work/app", true)
+	w.Git(repo, "config", "user.email", "oops@personal.com")
+	_, code := w.commit(repo, "n\n")
+	want(t, code == 0, "declining should commit: %d", code)
+	want(t, strings.Contains(w.Author(repo), "oops@personal.com"), "author %q", w.Author(repo))
 }
 
-// TestGuard_UnmappedRepo_IsYou_ProfileMatches_SavesRule verifies that confirming
-// identity and accepting the save offer persists a directory rule.
-func TestGuard_UnmappedRepo_IsYou_ProfileMatches_SavesRule(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitName, testutil.GitEmail)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// Y (is this you?) → Y (save rule?)
-	_, err := executeWithInput("y\ny\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
-	}
-	_, matched := config.MatchRule(cfg.Rules, repoDir)
-	if !matched {
-		t.Errorf("expected rule saved for %q, rules: %v", repoDir, cfg.Rules)
-	}
+func TestMismatchFromAuthorFlagOnlyWarns(t *testing.T) {
+	w := newWorld(t, true)
+	w.MustGids(w.Home, "rule", "add", "~/work", "Work")
+	repo := w.Repo("work/app", true)
+	out, code := w.commit(repo, "", "-m", "x", "--author", "Someone <else@x>")
+	want(t, code == 0 && strings.Contains(out, "--author"), "%d %s", code, out)
+	want(t, w.Author(repo) == "Someone <else@x>", "--author must be respected: %q", w.Author(repo))
 }
 
-// TestGuard_UnmappedRepo_IsYou_ProfileMatches_NoSave verifies declining the
-// save offer leaves rules unchanged.
-func TestGuard_UnmappedRepo_IsYou_ProfileMatches_NoSave(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitName, testutil.GitEmail)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// Y (is this you?) → N (save rule?)
-	_, err := executeWithInput("y\nn\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
-	}
-	if len(cfg.Rules) != 0 {
-		t.Errorf("expected no rules after decline, got: %v", cfg.Rules)
-	}
+func TestUnmappedConfirmAndSaveRule(t *testing.T) {
+	w := newWorld(t, true)
+	w.MustGids(w.Home, "profile", "add", "--name", "Global", "--git-name", "Global Me", "--email", "global@x.com")
+	repo := w.Repo("projects/foo", true)
+	out, code := w.commit(repo, "y\ny\n")
+	want(t, code == 0, "%d %s", code, out)
+	want(t, w.cfg().Rules["~/projects/foo/"] == "Global", "rules %v", w.cfg().Rules)
+	out, code = w.commit(repo, "")
+	want(t, code == 0 && !strings.Contains(out, "gids"), "now mapped, should be silent: %q", out)
+	w.check()
 }
 
-// TestGuard_UnmappedRepo_IsYou_NoProfileMatch_QuickCreate creates a new profile
-// when the current identity does not match any existing profile.
-func TestGuard_UnmappedRepo_IsYou_NoProfileMatch_QuickCreate(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	// workProfile matches testutil.GitName/Email — GitNameUnknown won't match.
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// Y (is this you?) → profile name → Y (save rule?)
-	input := "y\n" + testutil.ProfileNameNew + "\ny\n"
-	_, err := executeWithInput(input, "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
-	}
-	p := cfg.LookupProfile(testutil.ProfileNameNew)
-	if p == nil {
-		t.Fatalf("expected profile %q to be created", testutil.ProfileNameNew)
-	}
-	if p.GitName != testutil.GitNameUnknown {
-		t.Errorf("GitName = %q, want %q", p.GitName, testutil.GitNameUnknown)
-	}
-	if p.GitEmail != testutil.GitEmailUnknown {
-		t.Errorf("GitEmail = %q, want %q", p.GitEmail, testutil.GitEmailUnknown)
-	}
-	_, matched := config.MatchRule(cfg.Rules, repoDir)
-	if !matched {
-		t.Errorf("expected rule saved for %q, rules: %v", repoDir, cfg.Rules)
-	}
+func TestUnmappedConfirmCreatesProfileFromCurrentIdentity(t *testing.T) {
+	w := newWorld(t, true)
+	repo := w.Repo("projects/foo", true)
+	_, code := w.commit(repo, "y\nGlobal\ny\n")
+	want(t, code == 0 && w.Author(repo) == globalID, "%d %q", code, w.Author(repo))
+	p := w.cfg().Profile("Global")
+	want(t, p != nil && p.GitEmail == "global@x.com", "profile %+v", p)
+	want(t, w.cfg().Rules["~/projects/foo/"] == "Global", "rule missing")
+	w.check()
 }
 
-// TestGuard_UnmappedRepo_IsYou_NoProfileMatch_QuickCreate_NoSave verifies
-// declining the save offer after quick-create leaves rules empty.
-func TestGuard_UnmappedRepo_IsYou_NoProfileMatch_QuickCreate_NoSave(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// Y → profile name → N (no save rule)
-	input := "y\n" + testutil.ProfileNameNew + "\nn\n"
-	_, err := executeWithInput(input, "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
-	}
-	if len(cfg.Rules) != 0 {
-		t.Errorf("expected no rules, got: %v", cfg.Rules)
-	}
-	// Profile should still have been created.
-	if p := cfg.LookupProfile(testutil.ProfileNameNew); p == nil {
-		t.Errorf("expected profile %q to be created even without a rule", testutil.ProfileNameNew)
-	}
+func TestUnmappedConfirmSkipEverything(t *testing.T) {
+	w := newWorld(t, true)
+	repo := w.Repo("projects/foo", true)
+	before := w.Read(filepath.Join(w.GidsDir(), "config.yaml"))
+	_, code := w.commit(repo, "y\n\n") // yes, then Enter = don't save a profile
+	want(t, code == 0 && w.Author(repo) == globalID, "%d", code)
+	want(t, w.Read(filepath.Join(w.GidsDir(), "config.yaml")) == before, "config changed")
+	_, code = w.commit(repo, "y\n\n") // still unmapped: asks every time
+	want(t, code == 0, "%d", code)
 }
 
-// TestGuard_UnmappedRepo_NotYou_SelectProfile_Applies verifies that selecting
-// a profile from the list applies it to the local git config.
-func TestGuard_UnmappedRepo_NotYou_SelectProfile_Applies(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// N (not me) → 1 (select Work) → N (don't save rule)
-	_, err := executeWithInput("n\n1\nn\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	c := git.New(repoDir)
-	assertGitConfig(t, c, "user.name", testutil.GitName)
-	assertGitConfig(t, c, "user.email", testutil.GitEmail)
+func TestUnmappedWrongIdentityPickProfileThenRerun(t *testing.T) {
+	w := newWorld(t, true)
+	repo := w.Repo("projects/bot", true)
+	head := w.Git(repo, "rev-parse", "HEAD")
+	out, code := w.commit(repo, "n\n2\n") // 2 = Personal
+	want(t, code == 1 && strings.Contains(out, "Re-run"), "should stop for re-run: %d %s", code, out)
+	want(t, w.Git(repo, "rev-parse", "HEAD") == head, "a commit was made with the wrong identity")
+	want(t, w.cfg().Rules["~/projects/bot/"] == "Personal", "rule %v", w.cfg().Rules)
+	_, code = w.commit(repo, "")
+	want(t, code == 0 && w.Author(repo) == meID, "re-run author %q", w.Author(repo))
+	w.check()
 }
 
-// TestGuard_UnmappedRepo_NotYou_SelectProfile_SavesRule verifies that selecting
-// a profile and accepting the save offer creates a directory rule.
-func TestGuard_UnmappedRepo_NotYou_SelectProfile_SavesRule(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// N → 1 (Work) → Y (save rule)
-	_, err := executeWithInput("n\n1\ny\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
-	}
-	_, matched := config.MatchRule(cfg.Rules, repoDir)
-	if !matched {
-		t.Errorf("expected rule saved for %q, rules: %v", repoDir, cfg.Rules)
-	}
+func TestUnmappedWrongIdentityNoProfilesWizard(t *testing.T) {
+	w := newWorld(t, false)
+	repo := w.Repo("projects/bot", true)
+	// n → wizard: Name, Git name [prefilled], Git email, username, ssh key, signing key
+	out, code := w.commit(repo, "n\nPersonal\nBrian Nguyen\nnguyenbriankhoi@gmail.com\n\n\n\n")
+	want(t, code == 1, "%d %s", code, out)
+	_, code = w.commit(repo, "")
+	want(t, code == 0 && w.Author(repo) == meID, "author %q", w.Author(repo))
+	w.check()
 }
 
-// TestGuard_UnmappedRepo_NotYou_SelectProfile_InvalidThenValid verifies
-// out-of-range input re-prompts until a valid selection is made.
-func TestGuard_UnmappedRepo_NotYou_SelectProfile_InvalidThenValid(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{workProfile()})
-
-	// N → 0 (invalid) → 999 (invalid) → 1 (valid Work) → N (no save)
-	out, err := executeWithInput("n\n0\n999\n1\nn\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out, "between") {
-		t.Errorf("expected re-prompt error in output, got: %s", out)
-	}
-
-	c := git.New(repoDir)
-	assertGitConfig(t, c, "user.name", testutil.GitName)
+func TestUnmappedWizardPrefillsCurrentIdentity(t *testing.T) {
+	w := newWorld(t, false)
+	repo := w.Repo("projects/bot", true)
+	_, code := w.commit(repo, "n\nMe\n\n\n\n\n\n") // Enter keeps prefilled name and email
+	want(t, code == 1, "%d", code)
+	p := w.cfg().Profile("Me")
+	want(t, p != nil && p.Ident() == globalID, "prefill: %+v", p)
 }
 
-// TestGuard_UnmappedRepo_NotYou_NoProfiles_Wizard verifies the inline profile
-// creation wizard for blank-slate users, including profile creation, application,
-// rule saving, and the tip message.
-func TestGuard_UnmappedRepo_NotYou_NoProfiles_Wizard(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{})
-
-	// N (not me) → custom name → custom email → profile name → Y (save rule)
-	const wizardProfile = "MyProfile"
-	input := "n\n" + testutil.GitNameNew + "\n" + testutil.GitEmailNew + "\n" + wizardProfile + "\ny\n"
-	out, err := executeWithInput(input, "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
-	}
-
-	p := cfg.LookupProfile(wizardProfile)
-	if p == nil {
-		t.Fatalf("expected profile %q to be created", wizardProfile)
-	}
-	if p.GitName != testutil.GitNameNew {
-		t.Errorf("GitName = %q, want %q", p.GitName, testutil.GitNameNew)
-	}
-	if p.GitEmail != testutil.GitEmailNew {
-		t.Errorf("GitEmail = %q, want %q", p.GitEmail, testutil.GitEmailNew)
-	}
-
-	_, matched := config.MatchRule(cfg.Rules, repoDir)
-	if !matched {
-		t.Errorf("expected rule saved for %q, rules: %v", repoDir, cfg.Rules)
-	}
-
-	// Profile should be applied to local git config.
-	c := git.New(repoDir)
-	assertGitConfig(t, c, "user.name", testutil.GitNameNew)
-	assertGitConfig(t, c, "user.email", testutil.GitEmailNew)
-
-	// Tip should appear in output.
-	if !strings.Contains(out, "gids profile add") {
-		t.Errorf("expected 'gids profile add' tip in output, got: %s", out)
-	}
+func TestUnmappedNewProfileRowWithExistingProfiles(t *testing.T) {
+	w := newWorld(t, true)
+	repo := w.Repo("school/15213", true)
+	_, code := w.commit(repo, "n\n3\nSchool\nBrian Nguyen\nbqn@andrew.cmu.edu\n\n\n\n")
+	want(t, code == 1, "%d", code)
+	want(t, w.cfg().Rules["~/school/15213/"] == "School", "rules %v", w.cfg().Rules)
 }
 
-// TestGuard_UnmappedRepo_NotYou_NoProfiles_Wizard_DefaultPrefill verifies
-// pressing Enter at name/email prompts accepts the pre-filled git identity.
-func TestGuard_UnmappedRepo_NotYou_NoProfiles_Wizard_DefaultPrefill(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfgPath := writeConfig(t, cfgDir, []config.Profile{})
-
-	// N → Enter (keep GitNameUnknown) → Enter (keep GitEmailUnknown) → profile name → N
-	const prefillProfile = "DemoProfile"
-	input := "n\n\n\n" + prefillProfile + "\nn\n"
-	_, err := executeWithInput(input, "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestGuardEOFAndBadAnswersNeverHang(t *testing.T) {
+	w := newWorld(t, true)
+	repo := w.Repo("projects/foo", true)
+	for _, answers := range []string{"", "maybe\nwhat\n", "n\n", "n\n99\nzzz\n", "n\n3\n"} {
+		_, code := w.commit(repo, answers) // B1/B2 regression: must terminate
+		want(t, code == 0, "answers %q: exit %d (skips must let the commit proceed)", answers, code)
 	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
-	}
-	p := cfg.LookupProfile(prefillProfile)
-	if p == nil {
-		t.Fatalf("expected profile %q to be created", prefillProfile)
-	}
-	if p.GitName != testutil.GitNameUnknown {
-		t.Errorf("GitName = %q, want %q (pre-filled default)", p.GitName, testutil.GitNameUnknown)
-	}
-	if p.GitEmail != testutil.GitEmailUnknown {
-		t.Errorf("GitEmail = %q, want %q (pre-filled default)", p.GitEmail, testutil.GitEmailUnknown)
-	}
+	want(t, len(w.cfg().Rules) == 0, "nothing should be saved: %v", w.cfg().Rules)
+	w.check()
 }
 
-// TestGuard_MappedRepo_Silent verifies the guard exits silently when the
-// current identity already matches the mapped profile.
-func TestGuard_MappedRepo_Silent(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitName, testutil.GitEmail)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfg := &config.AppConfig{
-		Profiles: []config.Profile{workProfile()},
-		Rules:    map[string]string{repoDir: testutil.ProfileName},
-	}
-	cfgPath := writeRuleConfig(t, cfgDir, cfg)
-
-	out, err := execute("guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out != "" {
-		t.Errorf("expected silent output for mapped repo, got: %q", out)
-	}
+func TestGuardNonInteractiveFailsOpen(t *testing.T) {
+	w := newWorld(t, true)
+	repo := w.Repo("projects/foo", true)
+	w.Write(".no-tty-dir/x", "") // GIDS_TTY points at a missing file → no terminal
+	f := filepath.Join(repo, "f.txt")
+	os.WriteFile(f, []byte("ide edit\n"), 0o644)
+	w.Git(repo, "add", "f.txt")
+	out, err := w.TryGit(repo, "commit", "-m", "from an IDE")
+	want(t, err == nil && strings.Contains(out, "no rule for ~/projects/foo"), "%v %s", err, out)
 }
 
-// TestGuard_MappedRepo_IdentityMismatch_FixAccepted verifies that when the
-// current identity doesn't match the mapped profile and the user accepts the
-// fix offer, the mapped profile is applied to local git config.
-func TestGuard_MappedRepo_IdentityMismatch_FixAccepted(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
-
-	cfgDir := t.TempDir()
-	cfg := &config.AppConfig{
-		Profiles: []config.Profile{workProfile()},
-		Rules:    map[string]string{repoDir: testutil.ProfileName},
-	}
-	cfgPath := writeRuleConfig(t, cfgDir, cfg)
-
-	// Y → fix and apply mapped profile
-	out, err := executeWithInput("y\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Warning should mention the current email and the mapped profile.
-	for _, want := range []string{testutil.GitEmailUnknown, testutil.ProfileName, testutil.GitEmail} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in mismatch warning, got: %s", want, out)
-		}
-	}
-
-	// Profile should be applied.
-	c := git.New(repoDir)
-	assertGitConfig(t, c, "user.name", testutil.GitName)
-	assertGitConfig(t, c, "user.email", testutil.GitEmail)
+func TestGuardFailsOpenOnBrokenConfig(t *testing.T) {
+	w := newWorld(t, true)
+	repo := w.Repo("projects/foo", true)
+	w.Write(".config/gids/config.yaml", "profiles: [\n")
+	out, code := w.commit(repo, "")
+	want(t, code == 0 && strings.Contains(out, "skipping the identity check"), "%d %s", code, out)
+	r := w.Gids(w.Home, "", nil, "status")
+	want(t, r.Code == 1 && strings.Contains(r.Err, "config.yaml"), "status should name the bad file: %+v", r)
 }
 
-// TestGuard_MappedRepo_IdentityMismatch_FixDeclined verifies that when the
-// user declines the fix offer, git config is left unchanged.
-func TestGuard_MappedRepo_IdentityMismatch_FixDeclined(t *testing.T) {
-	repoDir := initGitRepo(t)
-	setGitIdentity(t, repoDir, testutil.GitNameUnknown, testutil.GitEmailUnknown)
-	t.Chdir(repoDir)
+func TestGuardHealsTamperedConfigThenAsksForRerun(t *testing.T) {
+	w := newWorld(t, true)
+	w.MustGids(w.Home, "rule", "add", "~/work", "Work")
+	repo := w.Repo("work/app", true)
+	w.Write(".config/gids/profiles/Work.gitconfig", "[user]\n\temail = hijacked@x\n")
+	out, code := w.commit(repo, "")
+	want(t, code == 1 && strings.Contains(out, "repaired"), "%d %s", code, out)
+	w.check()
+	_, code = w.commit(repo, "")
+	want(t, code == 0 && w.Author(repo) == workID, "%d %q", code, w.Author(repo))
+}
 
-	cfgDir := t.TempDir()
-	cfg := &config.AppConfig{
-		Profiles: []config.Profile{workProfile()},
-		Rules:    map[string]string{repoDir: testutil.ProfileName},
+// Found by the demo: git reports repo paths with symlinks resolved, so with a
+// symlinked HOME (macOS /var → /private/var, or ~/code → /Volumes/…) rules
+// must still be stored and shown in ~ form.
+func TestSymlinkedHomeKeepsTildeRules(t *testing.T) {
+	s := testenv.New(t)
+	link := filepath.Join(t.TempDir(), "home-link")
+	if err := os.Symlink(s.Home, link); err != nil {
+		t.Skip(err)
 	}
-	cfgPath := writeRuleConfig(t, cfgDir, cfg)
-
-	// N → proceed as-is
-	_, err := executeWithInput("n\n", "guard", "--config", cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Identity should be unchanged.
-	c := git.New(repoDir)
-	assertGitConfig(t, c, "user.name", testutil.GitNameUnknown)
-	assertGitConfig(t, c, "user.email", testutil.GitEmailUnknown)
+	t.Setenv("HOME", link)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(link, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(link, ".gitconfig"))
+	s.Write(".gitconfig", "[user]\n\tname = Global Me\n\temail = global@x.com\n")
+	w := &world{s, t}
+	w.MustGids(link, "install")
+	w.MustGids(link, "profile", "add", "--name", "Personal", "--git-name", "Brian Nguyen", "--email", "nguyenbriankhoi@gmail.com")
+	repo := w.Repo("projects/x", true)
+	viaLink := filepath.Join(link, "projects", "x")
+	w.MustGids(viaLink, "use", "Personal")
+	want(t, w.cfg().Rules["~/projects/x/"] == "Personal", "rule stored as %v", w.cfg().Rules)
+	st := w.MustGids(viaLink, "status")
+	want(t, strings.Contains(st, "rule ~/projects/x/"), "status:\n%s", st)
+	other := w.Repo("projects/y", true)
+	out, _ := w.commit(other, "y\n\n")
+	want(t, strings.Contains(out, "in ~/projects/y "), "guard should show ~ path: %s", out)
+	_, code := w.commit(repo, "")
+	want(t, code == 0 && w.Author(repo) == meID, "author %q", w.Author(repo))
 }

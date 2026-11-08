@@ -5,24 +5,51 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 7 * * 1" # weekly: catch newly disclosed vulnerabilities (SPEC §2.1)
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: Vet & Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      # Actions are pinned to commit SHAs (tags can be moved).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # later steps never need the token in .git/config
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Toolchain matches go.mod
+        run: test "$(go env GOVERSION)" = "$(sed -n 's/^toolchain //p' go.mod)"
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - name: Tests (race detector; includes kill-injection and pty e2e)
+        run: go test -race -timeout 20m ./...
 
-      - name: Run go vet
-        run: make vet
-
-      - name: Run tests with coverage
-        run: make test-coverage
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # later steps never need the token in .git/config
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Any vulnerability in any required module or the toolchain
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -scan module

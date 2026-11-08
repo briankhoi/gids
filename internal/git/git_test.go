@@ -1,530 +1,129 @@
-package git_test
+package git
 
 import (
+	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
-	"gids/internal/config"
-	"gids/internal/git"
-	"gids/internal/testutil"
+	"gids/internal/testenv"
 )
 
-// initRepo creates a temporary directory and initialises a bare-minimum git
-// repository inside it. Returns the repo root path.
-func initRepo(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	cmd := exec.Command("git", "init", dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	// Set required user config so later git commands don't fail on some systems.
-	for _, kv := range [][2]string{
-		{"user.email", "test@test.com"},
-		{"user.name", "Test"},
-	} {
-		c := exec.Command("git", "-C", dir, "config", "--local", kv[0], kv[1])
-		if out, err := c.CombinedOutput(); err != nil {
-			t.Fatalf("git config %s: %v\n%s", kv[0], err, out)
-		}
-	}
-	return dir
-}
+func TestMain(m *testing.M) { testenv.Main(m) }
 
-// --- IsRepo ---
-
-func TestIsRepo_InRepo(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-	ok, err := c.IsRepo()
+func TestRepoInfoIncludingWorktree(t *testing.T) {
+	s := testenv.New(t)
+	dir := s.Repo("proj", true)
+	r, err := Client{Dir: filepath.Join(dir)}.Repo()
 	if err != nil {
-		t.Fatalf("IsRepo: %v", err)
+		t.Fatal(err)
 	}
-	if !ok {
-		t.Error("expected IsRepo=true for git-init'd directory")
+	if r.RuleDir() != dir || r.TopLevel != dir {
+		t.Fatalf("repo %+v", r)
 	}
-}
-
-func TestIsRepo_NotRepo(t *testing.T) {
-	dir := t.TempDir() // plain directory, no git init
-	c := git.New(dir)
-	ok, err := c.IsRepo()
+	wt := s.Path("elsewhere", "wt")
+	s.Git(dir, "worktree", "add", "-q", wt)
+	w, err := Client{Dir: wt}.Repo()
 	if err != nil {
-		t.Fatalf("IsRepo: %v", err)
+		t.Fatal(err)
 	}
-	if ok {
-		t.Error("expected IsRepo=false for plain directory")
+	if w.RuleDir() != dir {
+		t.Fatalf("worktree RuleDir = %s, want main repo %s", w.RuleDir(), dir)
+	}
+	if _, err := (Client{Dir: s.Home}).Repo(); !errors.Is(err, ErrNotRepo) {
+		t.Fatalf("home isn't a repo: %v", err)
 	}
 }
 
-// --- ConfigSet / ConfigGet ---
-
-func TestConfigSet_And_Get(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	if err := c.ConfigSet("user.name", testutil.GitName); err != nil {
-		t.Fatalf("ConfigSet: %v", err)
+func TestConfigHelpers(t *testing.T) {
+	s := testenv.New(t)
+	dir := s.Repo("p", false)
+	g := Client{Dir: dir}
+	if _, ok, err := g.ConfigGet("user.email"); ok || err != nil {
+		t.Fatalf("unset key: ok=%v err=%v", ok, err)
 	}
+	s.Git(dir, "config", "user.email", "local@x")
+	src, ok, err := g.ConfigSource("user.email")
+	if err != nil || !ok || src.Scope != "local" || src.Value != "local@x" {
+		t.Fatalf("source %+v ok=%v err=%v", src, ok, err)
+	}
+	if err := g.ConfigUnsetLocal("user.email"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ConfigUnsetLocal("user.email"); err != nil { // already unset is fine
+		t.Fatal(err)
+	}
+	s.Git(dir, "config", "--add", "x.multi", "a")
+	s.Git(dir, "config", "--add", "x.multi", "b c")
+	if v, _ := g.ConfigGetAll("x.multi"); len(v) != 2 || v[1] != "b c" {
+		t.Fatalf("get-all %v", v)
+	}
+	if err := g.RequireVersion(2, 32); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RequireVersion(99, 0); err == nil {
+		t.Fatal("RequireVersion(99) passed")
+	}
+}
 
-	got, err := c.ConfigGet("user.name")
+// TestCommitTreeReproducesCommitsExactly is the foundation of `gids amend`:
+// re-creating a commit with its own fields must yield the same object.
+func TestCommitTreeReproducesCommitsExactly(t *testing.T) {
+	s := testenv.New(t)
+	dir := s.Repo("p", true)
+	g := Client{Dir: dir}
+	msgs := map[string]string{
+		"normal":          "subject\n\nbody line\n\nCo-authored-by: A <a@x>\n",
+		"no final nl":     "no newline at end",
+		"unicode":         "Nguyễn: thêm tính năng 🎵\n",
+		"leading blank":   "\n\nweird\n",
+		"trailing spaces": "x   \n\n\n",
+	}
+	for name, msg := range msgs {
+		t.Run(name, func(t *testing.T) {
+			head := s.Git(dir, "rev-parse", "HEAD")
+			tree := s.Git(dir, "rev-parse", "HEAD^{tree}")
+			author := Ident{"Ann Author", "ann@x", "1700000000 -0800"}
+			committer := Ident{"Cam Committer", "cam@x", "1700003600 +0530"}
+			sha, err := g.CommitTree(tree, []string{head}, author, committer, "", msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := g.ReadCommit(sha)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Message != msg || c.Author != author || c.Committer != committer || c.Tree != tree || len(c.Parents) != 1 {
+				t.Fatalf("read back %+v", c)
+			}
+			again, _ := g.CommitTree(c.Tree, c.Parents, c.Author, c.Committer, c.Encoding, c.Message)
+			if again != sha {
+				t.Fatalf("re-creating gave %s, want identical %s", again, sha)
+			}
+		})
+	}
+}
+
+func TestReadCommitEncodingAndRoot(t *testing.T) {
+	s := testenv.New(t)
+	dir := s.Repo("p", false)
+	g := Client{Dir: dir}
+	os.WriteFile(filepath.Join(dir, "a"), []byte("a"), 0o644)
+	s.Git(dir, "add", "a")
+	s.Git(dir, "-c", "i18n.commitEncoding=ISO-8859-1", "-c", "user.name=A", "-c", "user.email=a@x",
+		"commit", "-q", "--no-verify", "-m", "latin")
+	c, err := g.ReadCommit("HEAD")
 	if err != nil {
-		t.Fatalf("ConfigGet: %v", err)
+		t.Fatal(err)
 	}
-	if got != testutil.GitName {
-		t.Errorf("user.name = %q, want %q", got, testutil.GitName)
+	if c.Encoding != "ISO-8859-1" || len(c.Parents) != 0 {
+		t.Fatalf("commit %+v", c)
 	}
-}
-
-func TestConfigGet_UnsetKey_ReturnsEmpty(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	got, err := c.ConfigGet("core.sshCommand")
-	if err != nil {
-		t.Fatalf("ConfigGet on unset key: %v", err)
+	sha, err := g.CommitTree(c.Tree, nil, c.Author, c.Committer, c.Encoding, c.Message)
+	if err != nil || sha != c.SHA {
+		t.Fatalf("re-create root with encoding: %s vs %s (%v)", sha, c.SHA, err)
 	}
-	if got != "" {
-		t.Errorf("expected empty string for unset key, got %q", got)
-	}
-}
-
-// --- ConfigUnset ---
-
-func TestConfigUnset_ExistingKey(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	if err := c.ConfigSet("core.sshCommand", "ssh -i ~/.ssh/id_work"); err != nil {
-		t.Fatalf("ConfigSet: %v", err)
-	}
-	if err := c.ConfigUnset("core.sshCommand"); err != nil {
-		t.Fatalf("ConfigUnset: %v", err)
-	}
-
-	got, err := c.ConfigGet("core.sshCommand")
-	if err != nil {
-		t.Fatalf("ConfigGet after unset: %v", err)
-	}
-	if got != "" {
-		t.Errorf("expected key removed, got %q", got)
-	}
-}
-
-func TestConfigUnset_MissingKey_NoError(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	// Unsetting a key that was never set must not return an error.
-	if err := c.ConfigUnset("core.sshCommand"); err != nil {
-		t.Errorf("ConfigUnset on missing key: %v", err)
-	}
-}
-
-// --- Apply ---
-
-func TestApply_BasicIdentity(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	assertConfigEquals(t, c, "user.name", testutil.GitName)
-	assertConfigEquals(t, c, "user.email", testutil.GitEmail)
-}
-
-func TestApply_WithSSHKey_SetsSSHCommand(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home directory")
-	}
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		SSHKey:   testutil.SSHKey,
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	expanded := filepath.Join(home, ".ssh/id_example")
-	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+expanded+"'")
-}
-
-func TestApply_WithoutSSHKey_ClearsSSHCommand(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	// Pre-set a sshCommand so we can verify it gets cleared.
-	if err := c.ConfigSet("core.sshCommand", "ssh -i ~/.ssh/old_key"); err != nil {
-		t.Fatalf("ConfigSet pre-state: %v", err)
-	}
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		// SSHKey intentionally empty
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	assertConfigEquals(t, c, "core.sshCommand", "")
-}
-
-func TestApply_WithUsername_SetsCredentialUsername(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		Username: testutil.Username,
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	assertConfigEquals(t, c, "credential.username", testutil.Username)
-}
-
-func TestApply_WithoutUsername_ClearsCredentialUsername(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	if err := c.ConfigSet("credential.username", "old-user"); err != nil {
-		t.Fatalf("ConfigSet pre-state: %v", err)
-	}
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		// Username intentionally empty
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	assertConfigEquals(t, c, "credential.username", "")
-}
-
-func TestApply_WithSigningKey_SetsSigningKey(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	p := config.Profile{
-		Name:       testutil.ProfileName,
-		GitName:    testutil.GitName,
-		GitEmail:   testutil.GitEmail,
-		SigningKey: testutil.SigningKey,
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	assertConfigEquals(t, c, "user.signingKey", testutil.SigningKey)
-}
-
-func TestApply_WithoutSigningKey_ClearsSigningKey(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	if err := c.ConfigSet("user.signingKey", "OLD_KEY"); err != nil {
-		t.Fatalf("ConfigSet pre-state: %v", err)
-	}
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		// SigningKey intentionally empty
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	assertConfigEquals(t, c, "user.signingKey", "")
-}
-
-func TestApply_FullProfile(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home directory")
-	}
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	p := config.Profile{
-		Name:       testutil.ProfileName,
-		GitName:    testutil.GitName,
-		GitEmail:   testutil.GitEmail,
-		Username:   testutil.Username,
-		SSHKey:     testutil.SSHKey,
-		SigningKey: testutil.SigningKey,
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	expanded := filepath.Join(home, ".ssh/id_example")
-	assertConfigEquals(t, c, "user.name", testutil.GitName)
-	assertConfigEquals(t, c, "user.email", testutil.GitEmail)
-	assertConfigEquals(t, c, "core.sshCommand", "ssh -i '"+expanded+"'")
-	assertConfigEquals(t, c, "credential.username", testutil.Username)
-	assertConfigEquals(t, c, "user.signingKey", testutil.SigningKey)
-}
-
-// --- sshCommand quoting (shell injection safety) ---
-
-// TestApply_SSHKey_WithSpaces verifies that an SSH key path containing spaces is
-// correctly single-quoted in core.sshCommand so the shell does not split it.
-func TestApply_SSHKey_WithSpaces(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-	keyPath := "/home/alice/.ssh/my key file"
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		SSHKey:   keyPath,
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	want := "ssh -i '" + keyPath + "'"
-	assertConfigEquals(t, c, "core.sshCommand", want)
-}
-
-// TestApply_SSHKey_WithSingleQuote verifies that embedded single quotes in key
-// paths are properly escaped to prevent shell injection.
-func TestApply_SSHKey_WithSingleQuote(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-	keyPath := "/home/alice/.ssh/it's_a_key"
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		SSHKey:   keyPath,
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	want := `ssh -i '/home/alice/.ssh/it'\''s_a_key'`
-	assertConfigEquals(t, c, "core.sshCommand", want)
-}
-
-// TestApply_SSHKey_TildeIsExpanded verifies that a ~ prefix is expanded to the
-// absolute home directory at store time, so git can locate the key without
-// relying on shell tilde expansion (which does not occur inside single quotes).
-func TestApply_SSHKey_TildeIsExpanded(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home directory")
-	}
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		SSHKey:   "~/.ssh/id_work",
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	want := "ssh -i '" + filepath.Join(home, ".ssh/id_work") + "'"
-	assertConfigEquals(t, c, "core.sshCommand", want)
-}
-
-// TestApply_SSHKey_Tilde verifies that the legacy testutil.SSHKey fixture
-// (which uses a ~ prefix) is stored with the ~ expanded to an absolute path.
-func TestApply_SSHKey_Tilde(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home directory")
-	}
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-		SSHKey:   testutil.SSHKey, // "~/.ssh/id_example"
-	}
-	if err := git.Apply(c, p); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	// ~ is expanded to the absolute home directory at store time so git can
-	// locate the key; single-quoted paths inside sh -c do not tilde-expand.
-	want := "ssh -i '" + filepath.Join(home, ".ssh/id_example") + "'"
-	assertConfigEquals(t, c, "core.sshCommand", want)
-}
-
-// --- ConfigGetEffective ---
-
-// initRepoUserName is the user.name value seeded by initRepo.
-// Defined here so ConfigGetEffective tests stay in sync with initRepo's setup.
-const initRepoUserName = "Test"
-
-func TestConfigGetEffective_ReadsLocalValue(t *testing.T) {
-	dir := initRepo(t) // seeds user.name = initRepoUserName locally
-	c := git.New(dir)
-
-	got, err := c.ConfigGetEffective("user.name")
-	if err != nil {
-		t.Fatalf("ConfigGetEffective: %v", err)
-	}
-	if got != initRepoUserName {
-		t.Errorf("ConfigGetEffective(user.name) = %q, want %q", got, initRepoUserName)
-	}
-}
-
-func TestConfigGetEffective_UnsetKey_ReturnsEmpty(t *testing.T) {
-	dir := initRepo(t)
-	c := git.New(dir)
-
-	got, err := c.ConfigGetEffective("core.sshCommand")
-	if err != nil {
-		t.Fatalf("ConfigGetEffective on unset key: %v", err)
-	}
-	if got != "" {
-		t.Errorf("expected empty string for unset key, got %q", got)
-	}
-}
-
-// --- ConfigSetGlobal / ConfigGetGlobal / ConfigUnsetGlobal ---
-
-func TestConfigSetGlobal_And_GetGlobal(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
-
-	if err := git.ConfigSetGlobal("test.key", "hello"); err != nil {
-		t.Fatalf("ConfigSetGlobal: %v", err)
-	}
-
-	got, err := git.ConfigGetGlobal("test.key")
-	if err != nil {
-		t.Fatalf("ConfigGetGlobal: %v", err)
-	}
-	if got != "hello" {
-		t.Errorf("ConfigGetGlobal = %q, want %q", got, "hello")
-	}
-}
-
-func TestConfigGetGlobal_UnsetKey_ReturnsEmpty(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
-
-	got, err := git.ConfigGetGlobal("test.nonexistent")
-	if err != nil {
-		t.Fatalf("ConfigGetGlobal on unset key: %v", err)
-	}
-	if got != "" {
-		t.Errorf("expected empty string for unset key, got %q", got)
-	}
-}
-
-func TestConfigUnsetGlobal_ExistingKey(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
-
-	if err := git.ConfigSetGlobal("test.key", "value"); err != nil {
-		t.Fatalf("ConfigSetGlobal: %v", err)
-	}
-	if err := git.ConfigUnsetGlobal("test.key"); err != nil {
-		t.Fatalf("ConfigUnsetGlobal: %v", err)
-	}
-
-	got, err := git.ConfigGetGlobal("test.key")
-	if err != nil {
-		t.Fatalf("ConfigGetGlobal after unset: %v", err)
-	}
-	if got != "" {
-		t.Errorf("expected key removed after unset, got %q", got)
-	}
-}
-
-func TestConfigUnsetGlobal_MissingKey_NoError(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
-
-	if err := git.ConfigUnsetGlobal("test.nonexistent"); err != nil {
-		t.Errorf("ConfigUnsetGlobal on missing key: %v", err)
-	}
-}
-
-// --- Error paths ---
-
-// TestApply_ErrorPropagates verifies that Apply surfaces the underlying git error
-// when git commands cannot run (e.g., non-existent working directory).
-func TestApply_ErrorPropagates(t *testing.T) {
-	c := git.New("/nonexistent/path/that/does/not/exist")
-	p := config.Profile{
-		Name:     testutil.ProfileName,
-		GitName:  testutil.GitName,
-		GitEmail: testutil.GitEmail,
-	}
-	if err := git.Apply(c, p); err == nil {
-		t.Error("expected error for invalid git directory, got nil")
-	}
-}
-
-// TestConfigSet_Error verifies that ConfigSet surfaces git errors.
-func TestConfigSet_Error(t *testing.T) {
-	c := git.New("/nonexistent/path/that/does/not/exist")
-	if err := c.ConfigSet("user.name", "x"); err == nil {
-		t.Error("expected error for invalid git directory, got nil")
-	}
-}
-
-// TestConfigGet_Error verifies that ConfigGet surfaces unexpected git errors
-// (i.e., errors that are not "key not found").
-func TestConfigGet_Error(t *testing.T) {
-	c := git.New("/nonexistent/path/that/does/not/exist")
-	_, err := c.ConfigGet("user.name")
-	if err == nil {
-		t.Error("expected error for invalid git directory, got nil")
-	}
-}
-
-// TestConfigUnset_Error verifies that ConfigUnset surfaces unexpected git errors.
-func TestConfigUnset_Error(t *testing.T) {
-	c := git.New("/nonexistent/path/that/does/not/exist")
-	if err := c.ConfigUnset("user.name"); err == nil {
-		t.Error("expected error for invalid git directory, got nil")
-	}
-}
-
-// assertConfigEquals is a test helper that reads a git config key and fails if
-// it does not equal want.
-func assertConfigEquals(t *testing.T, c *git.Client, key, want string) {
-	t.Helper()
-	got, err := c.ConfigGet(key)
-	if err != nil {
-		t.Fatalf("ConfigGet(%q): %v", key, err)
-	}
-	if got != want {
-		t.Errorf("%s = %q, want %q", key, got, want)
+	if _, err := g.ReadCommit("--output=/tmp/x"); err == nil {
+		t.Fatal("option-looking revision accepted")
 	}
 }

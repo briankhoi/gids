@@ -3,360 +3,357 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"gids/internal/config"
 	"gids/internal/git"
+	"gids/internal/ui"
 )
 
-// preCommitScript returns the content for the git pre-commit hook script.
-func preCommitScript() string {
-	return "#!/bin/sh\ngids guard\n"
-}
-
-// defaultHooksDir returns the path to the gids-managed git hooks directory.
-func defaultHooksDir() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "gids", "hooks"), nil
-}
-
-// installGitHook creates the hooks directory, writes the pre-commit script, and
-// sets core.hooksPath in the global git config.
-func installGitHook(hooksDir string) error {
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return fmt.Errorf("creating hooks directory: %w", err)
-	}
-	hookPath := filepath.Join(hooksDir, "pre-commit")
-	if err := os.WriteFile(hookPath, []byte(preCommitScript()), 0o755); err != nil {
-		return fmt.Errorf("writing pre-commit hook: %w", err)
-	}
-	if err := git.ConfigSetGlobal("core.hooksPath", hooksDir); err != nil {
-		return fmt.Errorf("setting core.hooksPath: %w", err)
-	}
-	return nil
-}
-
-// uninstallGitHook unsets core.hooksPath from the global git config.
-func uninstallGitHook() error {
-	return git.ConfigUnsetGlobal("core.hooksPath")
-}
-
-const (
-	hookBeginMarker = "# gids:hook:begin"
-	hookEndMarker   = "# gids:hook:end"
-)
-
-// shellScript returns the complete shell hook script (including begin/end markers)
-// for the given shell. The script calls 'gids check' on directory change.
-func shellScript(shell string) (string, error) {
-	var inner string
-	switch shell {
-	case "zsh":
-		inner = `_gids_check() { gids check 2>/dev/null || true; }
-autoload -Uz add-zsh-hook
-add-zsh-hook chpwd _gids_check`
-	case "bash":
-		inner = `_gids_check() { gids check 2>/dev/null || true; }
-if [[ "${PROMPT_COMMAND}" != *"_gids_check"* ]]; then
-  PROMPT_COMMAND="_gids_check${PROMPT_COMMAND:+;${PROMPT_COMMAND}}"
-fi`
-	case "fish":
-		inner = `function _gids_check --on-variable PWD
-  gids check 2>/dev/null
-end`
-	case "powershell":
-		inner = `$_gidsOrigPrompt = $function:prompt
-function prompt { gids check 2>$null; & $_gidsOrigPrompt }`
-	default:
-		return "", fmt.Errorf("unsupported shell %q; supported: zsh, bash, fish, powershell", shell)
-	}
-	return hookBeginMarker + "\n" + inner + "\n" + hookEndMarker, nil
-}
-
-// defaultShellConfigPath returns the default shell config file path for shell.
-func defaultShellConfigPath(shell string) (string, error) {
-	home, err := homeDir()
-	if err != nil {
-		return "", err
-	}
-	switch shell {
-	case "zsh":
-		return filepath.Join(home, ".zshrc"), nil
-	case "bash":
-		return filepath.Join(home, ".bashrc"), nil
-	case "fish":
-		return filepath.Join(home, ".config", "fish", "config.fish"), nil
-	case "powershell":
-		return filepath.Join(home, ".config", "powershell", "Microsoft.PowerShell_profile.ps1"), nil
-	default:
-		return "", fmt.Errorf("unsupported shell %q; supported: zsh, bash, fish, powershell", shell)
-	}
-}
-
-// hookInstalled reports whether the gids hook is present in content by
-// checking for the begin marker only. Checking for the end marker is
-// intentionally omitted: a truncated file (begin present, end missing) is
-// treated as installed so that removeHook and addHook handle recovery
-// gracefully rather than appending a second block.
-func hookInstalled(content string) bool {
-	return strings.Contains(content, hookBeginMarker)
-}
-
-// addHook appends hookScript to content. If a hook block is already present it
-// is replaced. A trailing newline is ensured before appending.
-func addHook(content, hookScript string) string {
-	out := content
-	if hookInstalled(out) {
-		out = removeHook(out)
-	}
-	if out != "" && !strings.HasSuffix(out, "\n") {
-		out += "\n"
-	}
-	return out + hookScript + "\n"
-}
-
-// removeHook deletes the begin…end hook block from content, including the
-// trailing newline after the end marker. Returns content unchanged when no
-// hook is present.
-func removeHook(content string) string {
-	begin := strings.Index(content, hookBeginMarker)
-	if begin == -1 {
-		return content
-	}
-	tail := content[begin:]
-	endIdx := strings.Index(tail, hookEndMarker)
-	if endIdx == -1 {
-		return content
-	}
-	end := begin + endIdx + len(hookEndMarker)
-	// Consume the newline that follows the end marker.
-	if end < len(content) && content[end] == '\n' {
-		end++
-	}
-	return content[:begin] + content[end:]
-}
-
-// detectShell returns the shell name derived from the $SHELL environment variable.
-func detectShell() (string, error) {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		return "", fmt.Errorf("$SHELL is not set; specify shell with --shell")
-	}
-	return filepath.Base(shell), nil
-}
-
-// newHookCmd builds the 'hook' command group. When called with a shell name
-// (zsh, bash, fish, powershell) it prints the hook script. The install and
-// uninstall subcommands manage the hook in shell config files automatically.
-func newHookCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "hook [<shell>]",
-		Short: "Print or manage shell hook scripts for profile auto-switching",
-		Long: `Print or manage the shell hook that applies profiles automatically when you cd.
-
-Supported shells: zsh, bash, fish, powershell
-
-To set up auto-switching manually, append the hook to your shell config:
-  gids hook zsh  >> ~/.zshrc
-  gids hook bash >> ~/.bashrc
-
-To let gids manage the hook automatically:
-  gids hook install
-  gids hook uninstall`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			script, err := shellScript(args[0])
-			if err != nil {
-				return err
+// newHookExecCmd is what gids' hook shims call. It never fails a commit
+// because of its own problems (fail open, SPEC §8); it exits non-zero only to
+// deliberately stop a commit (identity fixed → re-run, or Ctrl-C).
+func newHookExecCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:    "hook-exec <hook> [args...]",
+		Short:  "Run a gids git hook (called by the hooks gids installs)",
+		Hidden: true,
+		Args:   cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if os.Getenv("GIDS_SKIP_HOOKS") == "1" {
+				return nil
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), script)
-			return nil
-		},
-	}
-
-	cmd.AddCommand(newHookInstallCmd())
-	cmd.AddCommand(newHookUninstallCmd())
-
-	return cmd
-}
-
-func newHookInstallCmd() *cobra.Command {
-	var shell, file, gitHooksDir string
-
-	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install the shell hook into your shell config file",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if shell == "" {
-				var err error
-				shell, err = detectShell()
-				if err != nil {
-					return err
+			defer func() { // a gids bug must never block a commit
+				if r := recover(); r != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "gids: internal error in %s hook (%v); skipping\n", args[0], r)
+					err = nil
 				}
-			}
-
-			script, err := shellScript(shell)
-			if err != nil {
-				return err
-			}
-
-			if file == "" {
-				file, err = defaultShellConfigPath(shell)
-				if err != nil {
-					return err
-				}
-			}
-
-			existing, err := os.ReadFile(file)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("reading %s: %w", tildify(file), err)
-			}
-			content := string(existing)
-
-			if hookInstalled(content) {
-				fmt.Fprintf(cmd.OutOrStdout(), "Shell hook already installed in %s.\n", tildify(file))
-			} else {
-				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-					return fmt.Errorf("creating directory: %w", err)
-				}
-				updated := addHook(content, script)
-				if err := os.WriteFile(file, []byte(updated), 0o644); err != nil {
-					return fmt.Errorf("writing %s: %w", tildify(file), err)
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Shell hook installed in %s.\n", tildify(file))
-				fmt.Fprintf(cmd.OutOrStdout(), "Restart your shell or run: source %s\n", tildify(file))
-			}
-
-			if gitHooksDir == "" {
-				gitHooksDir, err = defaultHooksDir()
-				if err != nil {
-					return fmt.Errorf("resolving hooks directory: %w", err)
-				}
-			}
-			if err := installGitHook(gitHooksDir); err != nil {
-				return fmt.Errorf("installing git pre-commit hook: %w", err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Pre-commit hook installed at %s.\n", tildify(gitHooksDir))
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&shell, "shell", "", "shell type (default: detect from $SHELL)")
-	cmd.Flags().StringVar(&file, "file", "", "shell config file (default: auto-detect per shell)")
-	cmd.Flags().StringVar(&gitHooksDir, "git-hooks-dir", "", "git hooks directory (default: $UserConfigDir/gids/hooks)")
-	cmd.Flags().MarkHidden("git-hooks-dir") //nolint:errcheck
-	return cmd
-}
-
-func newHookUninstallCmd() *cobra.Command {
-	var shell, file string
-
-	cmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Remove the shell hook from your shell config file",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if shell == "" {
-				var err error
-				shell, err = detectShell()
-				if err != nil {
-					return err
-				}
-			}
-
-			if file == "" {
-				var err error
-				file, err = defaultShellConfigPath(shell)
-				if err != nil {
-					return err
-				}
-			}
-
-			existing, err := os.ReadFile(file)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					fmt.Fprintf(cmd.OutOrStdout(), "Shell hook not installed (%s does not exist).\n", tildify(file))
-				} else {
-					return fmt.Errorf("reading %s: %w", tildify(file), err)
-				}
-			} else {
-				content := string(existing)
-				if !hookInstalled(content) {
-					fmt.Fprintf(cmd.OutOrStdout(), "Shell hook not installed in %s.\n", tildify(file))
-				} else {
-					updated := removeHook(content)
-					if err := os.WriteFile(file, []byte(updated), 0o644); err != nil {
-						return fmt.Errorf("writing %s: %w", tildify(file), err)
-					}
-					fmt.Fprintf(cmd.OutOrStdout(), "Shell hook removed from %s.\n", tildify(file))
-				}
-			}
-
-			if err := uninstallGitHook(); err != nil {
-				return fmt.Errorf("removing git pre-commit hook: %w", err)
-			}
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&shell, "shell", "", "shell type (default: detect from $SHELL)")
-	cmd.Flags().StringVar(&file, "file", "", "shell config file (default: auto-detect per shell)")
-	return cmd
-}
-
-// newCheckCmd builds the 'check' command, called by the shell hook on cd.
-func newCheckCmd() *cobra.Command {
-	var cfgPath string
-
-	cmd := &cobra.Command{
-		Use:    "check",
-		Short:  "Apply the matching profile for the current directory",
-		Long:   "check is called by the shell hook on every directory change. It silently applies the matching profile when a rule matches, and does nothing otherwise.",
-		Args:   cobra.NoArgs,
-		Hidden: true, // not a typical user-facing command
-		RunE: func(cmd *cobra.Command, args []string) error {
+			}()
 			cwd, err := os.Getwd()
 			if err != nil {
-				return fmt.Errorf("getting current directory: %w", err)
+				return nil
 			}
-
-			cfg, err := config.Load(cfgPath)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
+			h := &hookRun{c: c, g: git.Client{Dir: cwd}, stderr: cmd.ErrOrStderr()}
+			var code int
+			switch args[0] {
+			case "pre-commit":
+				code = h.preCommit()
+			case "commit-msg":
+				if len(args) > 1 {
+					h.commitMsg(args[1])
+				}
+			case "post-commit":
+				h.postCommit()
 			}
-
-			_, profileName, ok := config.FindMatchingRule(cfg.Rules, cwd)
-			if !ok {
-				return nil // no rule matches — nothing to do
+			if code != 0 {
+				return exitError{code}
 			}
-
-			p := cfg.LookupProfile(profileName)
-			if p == nil {
-				return nil // rule references a deleted profile — skip silently
-			}
-
-			client := git.New(cwd)
-			isRepo, err := client.IsRepo()
-			if err != nil {
-				return fmt.Errorf("checking git repo: %w", err)
-			}
-			if !isRepo {
-				return nil // not a git repo — nothing to do
-			}
-
-			return git.Apply(client, *p)
+			return nil
 		},
 	}
+}
 
-	cmd.Flags().StringVar(&cfgPath, "config", "",
-		"path to config file (default: $UserConfigDir/gids/config.yaml)")
-	return cmd
+type hookRun struct {
+	c      *cli
+	g      git.Client
+	stderr io.Writer
+}
+
+// note prints a one-line message from a hook to the user's terminal (hook
+// stderr is shown by git, also in most IDEs' git logs).
+func (h *hookRun) note(format string, a ...any) {
+	fmt.Fprintf(h.stderr, "gids: "+format+"\n", a...)
+}
+
+// openTTY opens the user's terminal for prompting from inside a hook, whose
+// stdin git sets to /dev/null. GIDS_TTY substitutes a file of scripted
+// answers (tests); then output goes to stderr.
+func openTTY() (in io.Reader, out io.Writer, closer func(), ok bool) {
+	if p := os.Getenv("GIDS_TTY"); p != "" {
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, nil, nil, false
+		}
+		return f, os.Stderr, func() { f.Close() }, true
+	}
+	if runtime.GOOS == "windows" {
+		in, err := os.Open("CONIN$")
+		if err != nil {
+			return nil, nil, nil, false
+		}
+		out, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0)
+		if err != nil {
+			in.Close()
+			return nil, nil, nil, false
+		}
+		return in, out, func() { in.Close(); out.Close() }, true
+	}
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	return f, f, func() { f.Close() }, true
+}
+
+// commitIdent is who this commit will be authored as. git exports it to the
+// pre-commit hook; `git var` is the fallback.
+func (h *hookRun) commitIdent() (name, email string) {
+	name, email = os.Getenv("GIT_AUTHOR_NAME"), os.Getenv("GIT_AUTHOR_EMAIL")
+	if email != "" {
+		return name, email
+	}
+	if out, err := h.g.Run("var", "GIT_AUTHOR_IDENT"); err == nil {
+		lt, gt := strings.IndexByte(out, '<'), strings.IndexByte(out, '>')
+		if lt > 0 && gt > lt {
+			return strings.TrimSpace(out[:lt]), out[lt+1 : gt]
+		}
+	}
+	return name, email
+}
+
+// preCommit is the commit guard (SPEC §8). Returns the hook's exit code.
+func (h *hookRun) preCommit() int {
+	env := h.c.env
+	cfg, _, identityChanged, err := env.Heal()
+	if cfg == nil {
+		h.note("%v; skipping the identity check", err)
+		return 0
+	}
+	if err != nil {
+		h.note("couldn't repair generated config: %v", err)
+	} else if identityChanged {
+		h.note("repaired its generated git config, which can change this commit's identity. Re-run your commit.")
+		return 1
+	}
+	repo, err := h.g.Repo()
+	if err != nil {
+		return 0
+	}
+	name, email := h.commitIdent()
+	mapped, _, _ := h.g.ConfigGet("gids.profile")
+	dir := env.Display(repo.RuleDir())
+
+	in, out, closeTTY, interactive := openTTY()
+	if interactive {
+		defer closeTTY()
+	} else {
+		in, out = strings.NewReader(""), h.stderr
+	}
+	u := ui.New(h.c.ui.Context(), in, out)
+
+	if p := cfg.Profile(mapped); p != nil {
+		if strings.EqualFold(email, p.GitEmail) && name == p.GitName {
+			return 0
+		}
+		return h.mismatch(u, interactive, p, name, email)
+	}
+
+	// Unmapped repo.
+	if !interactive {
+		h.note("no rule for %s; committing as %s <%s>", dir, name, email)
+		return 0
+	}
+	code, err := h.unmapped(u, cfg, repo, name, email)
+	return hookExit(code, err)
+}
+
+// hookExit maps prompt outcomes: Ctrl-C stops the commit (130); Ctrl-D/Esc
+// and other errors let it proceed unchanged.
+func hookExit(code int, err error) int {
+	switch {
+	case errors.Is(err, ui.ErrInterrupted):
+		return 130
+	case err != nil:
+		return 0
+	}
+	return code
+}
+
+func (h *hookRun) mismatch(u *ui.UI, interactive bool, p *config.Profile, name, email string) int {
+	// Which setting is wrong, and where does the wrong value come from?
+	key, got := "user.email", email
+	if strings.EqualFold(email, p.GitEmail) {
+		key, got = "user.name", name
+	}
+	src, _, _ := h.g.ConfigSource(key)
+	source, local := h.c.showOrigin(src.Origin), src.Scope == "local"
+	if src.Value != got { // the config agrees with the profile: --author or GIT_AUTHOR_* env
+		source, local = "--author or GIT_AUTHOR_* environment variables", false
+	}
+	msg := fmt.Sprintf("This commit is authored as %s <%s>, but this repo is mapped to %s (%s). Source: %s", name, email, p.Name, p.Ident(), source)
+	if !interactive {
+		h.note("%s", msg)
+		if local {
+			h.note("fix it with: gids use %s", p.Name)
+		}
+		return 0
+	}
+	u.Warn("%s", msg)
+	if !local {
+		u.Hint("gids only fixes overrides in .git/config; committing as-is.")
+		return 0
+	}
+	ok, err := u.Confirm("Remove the local override and re-run?", true)
+	if err != nil || !ok {
+		return hookExit(0, err)
+	}
+	for _, k := range identityKeys {
+		if err := h.g.ConfigUnsetLocal(k); err != nil {
+			u.Fail("couldn't remove %s: %v", k, err)
+			return 0
+		}
+	}
+	u.Success("Fixed: this repo now uses %s. Re-run your commit.", p.Name)
+	return 1
+}
+
+// unmapped handles a repo no rule covers. Returns 1 when the identity was
+// changed (so the commit must be re-run as the new identity).
+func (h *hookRun) unmapped(u *ui.UI, cfg *config.Config, repo git.Repo, name, email string) (int, error) {
+	env := h.c.env
+	dir := env.Display(repo.RuleDir())
+	u.Printf("Committing as %s <%s> in %s (no gids rule).\n", name, email, dir)
+	right, err := u.Confirm("Is this right?", true)
+	if err != nil {
+		return 0, err
+	}
+	ruleKey, err := config.NormalizeRule(repo.RuleDir(), repo.RuleDir(), env.Paths.Home)
+	if err != nil {
+		return 0, err
+	}
+	saveRule := func(profile string) error {
+		_, err := env.Mutate(func(cfg *config.Config) error {
+			if cfg.Profile(profile) == nil {
+				return fmt.Errorf("profile %q disappeared", profile)
+			}
+			cfg.SetRule(ruleKey, profile)
+			return nil
+		})
+		if err == nil {
+			u.Success("Rule saved: %s → %s", ruleKey, profile)
+		}
+		return err
+	}
+
+	if right {
+		if p := cfg.ProfileByIdentity(name, email); p != nil {
+			ok, err := u.Confirm(fmt.Sprintf("Always use %s for %s?", p.Name, dir), true)
+			if err != nil || !ok {
+				return 0, err
+			}
+			return 0, saveRule(p.Name)
+		}
+		pname, err := u.Input("Save as a new profile? Name (Enter to skip)", "", func(s string) error {
+			if s == "" {
+				return nil
+			}
+			if err := config.ValidateProfileName(s); err != nil {
+				return err
+			}
+			if cfg.ProfileFold(s) != nil {
+				return fmt.Errorf("a profile named %q already exists", s)
+			}
+			return nil
+		})
+		if err != nil || pname == "" {
+			return 0, err
+		}
+		p := config.Profile{Name: pname, GitName: name, GitEmail: email}
+		if err := p.Validate(); err != nil {
+			u.Fail("can't save this identity as a profile: %v", err)
+			return 0, nil
+		}
+		if _, err := env.Mutate(func(cfg *config.Config) error { return cfg.AddProfile(p) }); err != nil {
+			return 0, err
+		}
+		ok, err := u.Confirm(fmt.Sprintf("Always use %s for %s?", pname, dir), true)
+		if err != nil || !ok {
+			return 0, err
+		}
+		return 0, saveRule(pname)
+	}
+
+	// Wrong identity: choose or create the right profile, map the repo,
+	// then stop the commit so it's re-run as that identity.
+	const newRow = "+ New profile"
+	items := []ui.Item{}
+	for _, p := range cfg.Profiles {
+		items = append(items, ui.Item{Label: p.Name, Detail: p.Ident()})
+	}
+	choice := len(items)
+	if len(items) > 0 {
+		items = append(items, ui.Item{Label: newRow, Detail: "create one now"})
+		if choice, err = u.Select("Commit as which profile?", items); err != nil {
+			return 0, err
+		}
+	}
+	var pname string
+	if choice < len(cfg.Profiles) {
+		pname = cfg.Profiles[choice].Name
+	} else {
+		if len(cfg.Profiles) == 0 {
+			u.Printf("No profiles yet. Let's make one.\n")
+		}
+		p, err := h.c.withUI(u).profileForm("New profile", config.Profile{GitName: name, GitEmail: email},
+			func(s string) bool { return cfg.ProfileFold(s) != nil })
+		if err != nil {
+			return 0, err
+		}
+		if _, err := env.Mutate(func(cfg *config.Config) error { return cfg.AddProfile(p) }); err != nil {
+			return 0, err
+		}
+		pname = p.Name
+	}
+	if err := saveRule(pname); err != nil {
+		return 0, err
+	}
+	u.Success("This repo now uses %s. Re-run your commit to commit as %s.", pname, pname)
+	return 1, nil
+}
+
+// withUI returns a copy of c that talks through u (the terminal, in hooks).
+func (c *cli) withUI(u *ui.UI) *cli { cp := *c; cp.ui = u; return &cp }
+
+// commitMsg appends the session's Co-authored-by trailers (SPEC §9.1). It
+// leaves an empty message alone so git still aborts it (PROGRESS.md D1).
+func (h *hookRun) commitMsg(file string) {
+	authors, err := h.g.ConfigGetAll("gids.coauthor")
+	if err != nil || len(authors) == 0 {
+		return
+	}
+	msg, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+	stripped, err := h.g.RunInput(string(msg), "stripspace", "--strip-comments")
+	if err != nil || strings.TrimSpace(stripped) == "" {
+		return
+	}
+	args := []string{"interpret-trailers", "--in-place", "--if-exists", "addIfDifferent"}
+	for _, a := range authors {
+		if validCoauthor(a) {
+			args = append(args, "--trailer", "Co-authored-by: "+a)
+		}
+	}
+	if _, err := h.g.Run(append(args, file)...); err != nil {
+		h.note("couldn't add co-authors: %v", err)
+	}
+}
+
+// postCommit ends a --once pairing session after a successful commit.
+func (h *hookRun) postCommit() {
+	once, _, _ := h.g.ConfigGet("gids.coauthorOnce", "--local", "--type=bool")
+	if once != "true" {
+		return
+	}
+	if err := clearSession(h.g); err != nil {
+		h.note("couldn't clear one-time co-authors: %v", err)
+		return
+	}
+	h.note("one-time co-authors cleared")
 }

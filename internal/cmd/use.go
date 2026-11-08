@@ -1,84 +1,101 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"gids/internal/config"
 	"gids/internal/git"
+	"gids/internal/ui"
 )
 
-func newUseCmd() *cobra.Command {
-	var cfgPath string
+// pickProfile shows the profile picker.
+func (c *cli) pickProfile(title string, cfg *config.Config) (string, error) {
+	if len(cfg.Profiles) == 0 {
+		return "", fmt.Errorf("no profiles yet; add one with: gids profile add")
+	}
+	items := make([]ui.Item, len(cfg.Profiles))
+	for i, p := range cfg.Profiles {
+		items[i] = ui.Item{Label: p.Name, Detail: p.Ident()}
+	}
+	i, err := c.ui.Select(title, items)
+	if err != nil {
+		return "", err
+	}
+	return cfg.Profiles[i].Name, nil
+}
 
-	cmd := &cobra.Command{
-		Use:   "use <profile>",
-		Short: "Apply a profile to the current git repository",
-		Args:  cobra.ExactArgs(1),
+func newUseCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:               "use [<profile>]",
+		Short:             "Always use <profile> in the current repo",
+		Long:              "Saves a rule mapping the current repo to <profile> (no argument: pick one).",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: c.completeProfiles,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-
-			cfg, err := config.Load(cfgPath)
+			g, r, err := c.repo()
 			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-
-			p := cfg.LookupProfile(name)
-			if p == nil {
-				return fmt.Errorf("profile %q not found", name)
-			}
-			if err := p.Validate(); err != nil {
-				return fmt.Errorf("profile %q is incomplete: %w", name, err)
-			}
-
-			cwd, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("getting current directory: %w", err)
-			}
-
-			client := git.New(cwd)
-			ok, err := client.IsRepo()
-			if err != nil {
-				return fmt.Errorf("checking git repo: %w", err)
-			}
-			if !ok {
-				return fmt.Errorf("not a git repository")
-			}
-
-			if err := git.Apply(client, *p); err != nil {
 				return err
 			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Applied profile %q (%s <%s>).\n",
-				p.Name, p.GitName, p.GitEmail)
-
-			// If this directory is not yet governed by a rule, offer to save one.
-			_, alreadyMapped := config.MatchRule(cfg.Rules, cwd)
-			if !alreadyMapped {
-				displayDir := tildify(cwd)
-				r := bufio.NewReader(cmd.InOrStdin())
-				save, err := confirmPrompt(r, cmd.OutOrStdout(),
-					fmt.Sprintf("Always use %q for %s?", name, displayDir), true)
-				if err != nil {
-					return fmt.Errorf("reading response: %w", err)
-				}
-				if save {
-					cfg.AddRule(displayDir, name)
-					if err := config.Save(cfg, cfgPath); err != nil {
-						return fmt.Errorf("saving rule: %w", err)
-					}
-					fmt.Fprintf(cmd.OutOrStdout(), "Rule saved: %s -> %s\n", displayDir, name)
-				}
+			cfg, err := c.load()
+			if err != nil {
+				return err
 			}
-
-			return nil
+			name := ""
+			if len(args) == 1 {
+				name = args[0]
+			} else if name, err = c.pickProfile("Use which profile here?", cfg); err != nil {
+				return err
+			}
+			dir, err := config.NormalizeRule(r.RuleDir(), r.RuleDir(), c.env.Paths.Home)
+			if err != nil {
+				return err
+			}
+			if err := c.setRule(dir, name); err != nil {
+				return err
+			}
+			return c.offerRemoveOverrides(g)
 		},
 	}
+}
 
-	cmd.Flags().StringVar(&cfgPath, "config", "",
-		"path to config file (default: $UserConfigDir/gids/config.yaml)")
-	return cmd
+// identityKeys are the settings a profile controls; a local value overrides it.
+var identityKeys = []string{"user.name", "user.email", "user.signingKey", "gpg.format", "core.sshCommand", "credential.username"}
+
+// localOverrides lists "key = value" for identity keys set in .git/config.
+func localOverrides(g git.Client) ([]string, error) {
+	var out []string
+	for _, k := range identityKeys {
+		v, ok, err := g.ConfigGet(k, "--local")
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, k+" = "+v)
+		}
+	}
+	return out, nil
+}
+
+// offerRemoveOverrides offers to delete identity settings in .git/config that
+// would beat the profile (e.g. left by gids v1 or a manual git config).
+func (c *cli) offerRemoveOverrides(g git.Client) error {
+	ov, err := localOverrides(g)
+	if err != nil || len(ov) == 0 {
+		return err
+	}
+	c.ui.Warn("This repo's .git/config overrides the profile:\n    %s", strings.Join(ov, "\n    "))
+	ok, err := c.ui.Confirm("Remove these local settings?", true)
+	if err != nil || !ok {
+		return err
+	}
+	for _, k := range identityKeys {
+		if err := g.ConfigUnsetLocal(k); err != nil {
+			return err
+		}
+	}
+	c.ui.Success("Removed local overrides.")
+	return nil
 }

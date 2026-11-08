@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -13,306 +11,426 @@ import (
 
 	"gids/internal/config"
 	"gids/internal/sshconfig"
+	"gids/internal/ui"
 )
 
-func newProfileCmd() *cobra.Command {
-	var cfgPath string
-
-	cmd := &cobra.Command{
-		Use:   "profile",
-		Short: "Manage Git identity profiles",
-	}
-	cmd.PersistentFlags().StringVar(&cfgPath, "config", "", "path to config file (default: $UserConfigDir/gids/config.yaml)")
-	cmd.AddCommand(newProfileAddCmd(&cfgPath))
-	cmd.AddCommand(newProfileListCmd(&cfgPath))
-	cmd.AddCommand(newProfileEditCmd(&cfgPath))
-	cmd.AddCommand(newProfileDeleteCmd(&cfgPath))
-	cmd.AddCommand(newProfileImportCmd(&cfgPath))
+func newProfileCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{Use: "profile", Short: "Manage identity profiles"}
+	cmd.AddCommand(newProfileAddCmd(c), newProfileListCmd(c), newProfileEditCmd(c), newProfileDeleteCmd(c), newProfileImportCmd(c))
 	return cmd
 }
 
-func printProfileTable(w io.Writer, profiles []config.Profile) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tGIT NAME\tGIT EMAIL\tUSERNAME\tSSH KEY")
-	for _, p := range profiles {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			p.Name, p.GitName, p.GitEmail, p.Username, p.SSHKey)
+// profileFlags lets every field be given on the command line (scripts,
+// tests); the form only asks for what's missing or invalid.
+type profileFlags struct {
+	name, gitName, email, username, sshKey, signingKey string
+}
+
+func (f *profileFlags) register(cmd *cobra.Command) {
+	fl := cmd.Flags()
+	fl.StringVar(&f.name, "name", "", "profile name (e.g. Work)")
+	fl.StringVar(&f.gitName, "git-name", "", "git author name")
+	fl.StringVar(&f.email, "email", "", "git author email")
+	fl.StringVar(&f.username, "username", "", "HTTPS username (credential.username)")
+	fl.StringVar(&f.sshKey, "ssh-key", "", "SSH private key path (core.sshCommand)")
+	fl.StringVar(&f.signingKey, "signing-key", "", "GPG key id or SSH key path for signing")
+}
+
+// overlay applies flags the user set onto p.
+func (f *profileFlags) overlay(cmd *cobra.Command, p config.Profile) config.Profile {
+	set := func(flag string, dst *string, v string) {
+		if cmd.Flags().Changed(flag) {
+			*dst = v
+		}
+	}
+	set("name", &p.Name, f.name)
+	set("git-name", &p.GitName, f.gitName)
+	set("email", &p.GitEmail, f.email)
+	set("username", &p.Username, f.username)
+	set("ssh-key", &p.SSHKey, f.sshKey)
+	set("signing-key", &p.SigningKey, f.signingKey)
+	return p
+}
+
+// profileForm asks for every field (pre-filled with p) and returns the result.
+// nameTaken rejects names already used by another profile.
+func (c *cli) profileForm(title string, p config.Profile, nameTaken func(string) bool) (config.Profile, error) {
+	vals, err := c.ui.Form(title, []ui.Field{
+		{Label: "Name", Value: p.Name, Validate: func(s string) error {
+			if err := config.ValidateProfileName(s); err != nil {
+				return err
+			}
+			if nameTaken(s) {
+				return fmt.Errorf("a profile named %q already exists", s)
+			}
+			return nil
+		}},
+		{Label: "Git name", Value: p.GitName, Validate: config.ValidateGitName},
+		{Label: "Git email", Value: p.GitEmail, Validate: config.ValidateEmail},
+		{Label: "Username", Value: p.Username, Optional: true, Validate: config.ValidateUsername},
+		{Label: "SSH key", Value: p.SSHKey, Optional: true, Validate: config.ValidateKeyPath, Hint: c.fileHint},
+		{Label: "Signing key", Value: p.SigningKey, Optional: true, Validate: config.ValidateSigningKey},
+	})
+	if err != nil {
+		return config.Profile{}, err
+	}
+	return config.Profile{Name: vals[0], GitName: vals[1], GitEmail: vals[2], Username: vals[3], SSHKey: vals[4], SigningKey: vals[5]}, nil
+}
+
+// fileHint says whether an SSH key path exists, as a live form hint.
+func (c *cli) fileHint(path string) string {
+	if path == "" || config.ValidateKeyPath(path) != nil {
+		return ""
+	}
+	if _, err := os.Stat(c.env.Expand(path)); err != nil {
+		return "⚠ not found"
+	}
+	return "✓ file exists"
+}
+
+func newProfileAddCmd(c *cli) *cobra.Command {
+	var f profileFlags
+	cmd := &cobra.Command{
+		Use:   "add",
+		Short: "Add a profile (asks for anything not given as a flag)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := c.load()
+			if err != nil {
+				return err
+			}
+			p := f.overlay(cmd, config.Profile{})
+			if p.Validate() != nil || cfg.ProfileFold(p.Name) != nil {
+				taken := func(s string) bool { return cfg.ProfileFold(s) != nil }
+				if p, err = c.profileForm("New profile", p, taken); err != nil {
+					return err
+				}
+			}
+			if _, err := c.env.Mutate(func(cfg *config.Config) error { return cfg.AddProfile(p) }); err != nil {
+				return err
+			}
+			c.ui.Success("Profile %q saved (%s).", p.Name, p.Ident())
+			if p.SSHKey == "" && p.Username == "" {
+				c.ui.Hint("No SSH key or username set: push/pull use your system defaults.")
+			}
+			if len(cfg.Rules) == 0 {
+				c.ui.Hint("Map it to a directory: gids rule add ~/work %s   (or 'gids use %s' inside a repo)", p.Name, p.Name)
+			}
+			return nil
+		},
+	}
+	f.register(cmd)
+	return cmd
+}
+
+func newProfileListCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List profiles",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := c.load()
+			if err != nil {
+				return err
+			}
+			if len(cfg.Profiles) == 0 {
+				c.ui.Printf("No profiles yet. Add one: gids profile add\n")
+				return nil
+			}
+			printProfiles(c, cfg, cfg.Profiles)
+			return nil
+		},
+	}
+}
+
+func printProfiles(c *cli, cfg *config.Config, ps []config.Profile) {
+	tw := tabwriter.NewWriter(c.ui.Out(), 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tGIT NAME\tEMAIL\tSSH KEY\tRULES")
+	for _, p := range ps {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", p.Name, p.GitName, p.GitEmail, dash(p.SSHKey), len(cfg.RulesFor(p.Name)))
 	}
 	tw.Flush()
 }
 
-func newProfileAddCmd(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
-		Use:   "add",
-		Short: "Add a new identity profile",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*cfgPath)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-
-			p, err := buildProfileFromPrompts(bufio.NewReader(cmd.InOrStdin()), cmd.OutOrStdout(), cfg)
-			if err != nil {
-				return err
-			}
-
-			cfg.Profiles = append(cfg.Profiles, p)
-
-			if err := config.Save(cfg, *cfgPath); err != nil {
-				return fmt.Errorf("saving config: %w", err)
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Profile %q added.\n", p.Name)
-			return nil
-		},
+func dash(s string) string {
+	if s == "" {
+		return "-"
 	}
+	return s
 }
 
-func newProfileListCmd(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List all identity profiles",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*cfgPath)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-
-			out := cmd.OutOrStdout()
-			if len(cfg.Profiles) == 0 {
-				fmt.Fprintln(out, "No profiles found. Run 'gids profile add' to create one.")
-				return nil
-			}
-
-			printProfileTable(out, cfg.Profiles)
-			return nil
-		},
-	}
-}
-
-func newProfileEditCmd(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
-		Use:   "edit <name>",
-		Short: "Edit an existing identity profile",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			cfg, err := config.Load(*cfgPath)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-
-			p, idx := cfg.FindProfile(name)
-			if p == nil {
-				return fmt.Errorf("profile %q not found", name)
-			}
-
-			out := cmd.OutOrStdout()
-			r := bufio.NewReader(cmd.InOrStdin())
-
-			gitName, err := promptRequired(r, out, fmt.Sprintf("Git name [%s]: ", p.GitName), p.GitName)
-			if err != nil {
-				return err
-			}
-
-			gitEmail, err := promptRequired(r, out, fmt.Sprintf("Git email [%s]: ", p.GitEmail), p.GitEmail)
-			if err != nil {
-				return err
-			}
-
-			username, err := promptOptional(r, out, "Username", p.Username)
-			if err != nil {
-				return err
-			}
-
-			sshKey, err := promptOptional(r, out, "SSH key path", p.SSHKey)
-			if err != nil {
-				return err
-			}
-
-			signingKey, err := promptOptional(r, out, "Signing key", p.SigningKey)
-			if err != nil {
-				return err
-			}
-
-			warnNoAuth(out, username, sshKey, signingKey)
-
-			cfg.Profiles[idx] = editedProfile(*p, gitName, gitEmail, username, sshKey, signingKey)
-
-			if err := config.Save(cfg, *cfgPath); err != nil {
-				return fmt.Errorf("saving config: %w", err)
-			}
-
-			fmt.Fprintf(out, "Profile %q updated.\n", name)
-			return nil
-		},
-	}
-}
-
-func newProfileDeleteCmd(cfgPath *string) *cobra.Command {
-	var force bool
-
+func newProfileEditCmd(c *cli) *cobra.Command {
+	var f profileFlags
 	cmd := &cobra.Command{
-		Use:     "delete <name>",
-		Aliases: []string{"rm"},
-		Short:   "Delete an identity profile",
-		Args:    cobra.ExactArgs(1),
+		Use:               "edit <name>",
+		Short:             "Edit a profile (flags change fields directly; otherwise a form)",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: c.completeProfiles,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			cfg, err := config.Load(*cfgPath)
+			cfg, err := c.load()
 			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
+				return err
 			}
-
-			if p, _ := cfg.FindProfile(name); p == nil {
-				return fmt.Errorf("profile %q not found", name)
+			old := cfg.ProfileFold(args[0])
+			if old == nil {
+				return fmt.Errorf("profile %q not found", args[0])
 			}
+			oldName := old.Name
+			p := f.overlay(cmd, *old)
+			if cmd.Flags().NFlag() == 0 || p.Validate() != nil {
+				taken := func(s string) bool { q := cfg.ProfileFold(s); return q != nil && q.Name != oldName }
+				if p, err = c.profileForm("Edit profile "+oldName, p, taken); err != nil {
+					return err
+				}
+			}
+			if _, err := c.env.Mutate(func(cfg *config.Config) error { return cfg.ReplaceProfile(oldName, p) }); err != nil {
+				return err
+			}
+			if p.Name != oldName {
+				c.ui.Success("Profile %q renamed to %q and updated; its rules follow it.", oldName, p.Name)
+			} else {
+				c.ui.Success("Profile %q updated.", p.Name)
+			}
+			return nil
+		},
+	}
+	f.register(cmd)
+	return cmd
+}
 
-			out := cmd.OutOrStdout()
+func newProfileDeleteCmd(c *cli) *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:               "delete <name>",
+		Aliases:           []string{"rm"},
+		Short:             "Delete a profile",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: c.completeProfiles,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := c.load()
+			if err != nil {
+				return err
+			}
+			p := cfg.ProfileFold(args[0])
+			if p == nil {
+				return fmt.Errorf("profile %q not found", args[0])
+			}
+			name, rules := p.Name, cfg.RulesFor(p.Name)
+			if len(rules) > 0 && !force {
+				return fmt.Errorf("profile %q is used by %d rule(s): %s\nRemove them first, or use --force to delete the profile and its rules", name, len(rules), strings.Join(rules, ", "))
+			}
 			if !force {
-				r := bufio.NewReader(cmd.InOrStdin())
-				ok, err := confirmPrompt(r, out, fmt.Sprintf("Delete profile %q?", name), false)
+				ok, err := c.ui.Confirm(fmt.Sprintf("Delete profile %q?", name), false)
 				if err != nil {
 					return err
 				}
 				if !ok {
-					fmt.Fprintln(out, "Aborted.")
+					c.ui.Printf("Kept %q.\n", name)
 					return nil
 				}
 			}
-
-			cfg.DeleteProfile(name)
-
-			if err := config.Save(cfg, *cfgPath); err != nil {
-				return fmt.Errorf("saving config: %w", err)
+			if _, err := c.env.Mutate(func(cfg *config.Config) error {
+				if cfg.Profile(name) == nil {
+					return fmt.Errorf("profile %q not found", name)
+				}
+				cfg.DeleteProfile(name)
+				return nil
+			}); err != nil {
+				return err
 			}
-
-			fmt.Fprintf(out, "Profile %q deleted.\n", name)
+			c.ui.Success("Deleted profile %q%s.", name, plural(len(rules), " and its rule", " and its %d rules"))
 			return nil
 		},
 	}
-
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation prompt")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "don't ask; also delete rules that use the profile")
 	return cmd
 }
 
-func newProfileImportCmd(cfgPath *string) *cobra.Command {
-	var filePath string
-	var hostFilter string
+// plural formats n with one/many variants ("" when n is 0).
+func plural(n int, one, many string) string {
+	switch n {
+	case 0:
+		return ""
+	case 1:
+		return one
+	}
+	if strings.Contains(many, "%d") {
+		return fmt.Sprintf(many, n)
+	}
+	return many
+}
 
+func (c *cli) completeProfiles(cmd *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+	cfg, err := config.Load(c.envPathsConfig())
+	if err != nil || len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, p := range cfg.Profiles {
+		names = append(names, p.Name)
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
+// envPathsConfig works during completion, before PersistentPreRun ran.
+func (c *cli) envPathsConfig() string {
+	if c.env != nil {
+		return c.env.Paths.Config
+	}
+	p, err := config.ResolvePaths()
+	if err != nil {
+		return ""
+	}
+	return p.Config
+}
+
+func newProfileImportCmd(c *cli) *cobra.Command {
+	var file, host string
 	cmd := &cobra.Command{
 		Use:   "import",
-		Short: "Import profiles from an SSH config file",
+		Short: "Create profiles from Host blocks in an SSH config",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			out := cmd.OutOrStdout()
-			r := bufio.NewReader(cmd.InOrStdin())
-
-			resolvedPath, err := resolveSSHConfigPath(r, out, filePath)
+			if file == "" {
+				var err error
+				if file, err = c.pickSSHConfig(); err != nil {
+					return err
+				}
+			}
+			hosts, err := sshconfig.ParseFile(c.env.Expand(file))
 			if err != nil {
 				return err
 			}
-
-			fmt.Fprintf(out, "\nParsing %s...\n\n", tildify(resolvedPath))
-			hosts, err := sshconfig.ParseFile(resolvedPath)
-			if err != nil {
-				return err
-			}
-
-			hosts = filterHosts(hosts, hostFilter)
-
+			hosts = sshconfig.Filter(hosts, host)
 			if len(hosts) == 0 {
-				fmt.Fprintf(out, "No SSH host entries found in %s.\n", resolvedPath)
+				c.ui.Printf("No SSH host entries found in %s.\n", c.env.Display(file))
 				return nil
 			}
-
-			fmt.Fprintf(out, "Found %d host entr%s:\n", len(hosts), pluralSuffix(len(hosts), "y", "ies"))
+			items := make([]ui.Item, len(hosts))
+			checked := make([]bool, len(hosts))
 			for i, h := range hosts {
-				fmt.Fprintf(out, "  [%d] %-20s IdentityFile: %-25s User: %s\n",
-					i+1, h.Pattern, h.IdentityFile, h.User)
+				items[i] = ui.Item{Label: h.Pattern, Detail: strings.TrimSpace(dash(h.IdentityFile) + "  user " + dash(h.User))}
+				checked[i] = true
 			}
-			fmt.Fprintln(out)
-
-			toImport, err := selectHostsToImport(r, out, hosts)
+			sel, err := c.ui.MultiSelect("Hosts to import", items, checked)
 			if err != nil {
 				return err
 			}
-			if len(toImport) == 0 {
-				fmt.Fprintln(out, "Nothing to import.")
-				return nil
-			}
-
-			cfg, err := config.Load(*cfgPath)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-
 			var created []config.Profile
-			var lastGitName string
-
-			for _, h := range toImport {
-				fmt.Fprintf(out, "\n--- Importing %q ---\n", h.Pattern)
-				p, ok, err := importHost(r, out, cfg, h, lastGitName)
+			lastName := ""
+			for i, h := range hosts {
+				if !sel[i] {
+					continue
+				}
+				p, ok, err := c.importHost(h, lastName)
+				if errors.Is(err, ui.ErrSkipped) {
+					c.ui.Hint("Skipped %q.", h.Pattern)
+					continue
+				}
 				if err != nil {
 					return err
 				}
-				if !ok {
-					continue
+				if ok {
+					created = append(created, p)
+					lastName = p.GitName
 				}
-				lastGitName = p.GitName
-				created = append(created, p)
-				fmt.Fprintf(out, "Profile %q created.\n", h.Pattern)
 			}
-
 			if len(created) == 0 {
+				c.ui.Printf("Nothing imported.\n")
 				return nil
 			}
-
-			if err := config.Save(cfg, *cfgPath); err != nil {
-				return fmt.Errorf("saving config: %w", err)
+			cfg, err := c.load()
+			if err != nil {
+				return err
 			}
-
-			fmt.Fprintf(out, "\nCreated %d profile(s):\n", len(created))
-			printProfileTable(out, created)
-
-			fmt.Fprintln(out, "\nTo modify a profile, run:")
-			for _, p := range created {
-				fmt.Fprintf(out, "  gids profile edit %q\n", p.Name)
-			}
+			c.ui.Success("Imported %d profile(s):", len(created))
+			printProfiles(c, cfg, created)
+			c.ui.Hint("Adjust any of them with: gids profile edit <name>")
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&filePath, "file", "", "SSH config file to import from (skips discovery)")
-	cmd.Flags().StringVar(&hostFilter, "host", "", "import only hosts whose pattern contains this string (case-insensitive)")
+	cmd.Flags().StringVar(&file, "file", "", "SSH config file (default: choose from the usual locations)")
+	cmd.Flags().StringVar(&host, "host", "", "only hosts whose pattern contains this text (case-insensitive)")
 	return cmd
 }
 
-// homeDir returns the current user's home directory.
-func homeDir() (string, error) {
-	return os.UserHomeDir()
+// importHost asks for the git identity of one SSH host and saves the profile.
+func (c *cli) importHost(h sshconfig.Host, lastName string) (config.Profile, bool, error) {
+	cfg, err := c.load()
+	if err != nil {
+		return config.Profile{}, false, err
+	}
+	name := h.Pattern
+	if config.ValidateProfileName(name) != nil || cfg.ProfileFold(name) != nil {
+		if cfg.ProfileFold(name) != nil {
+			c.ui.Warn("Profile %q already exists, skipping.", name)
+			return config.Profile{}, false, nil
+		}
+		c.ui.Hint("%q can't be a profile name.", name)
+		name, err = c.ui.Input("Profile name for "+h.Pattern, "", func(s string) error {
+			if err := config.ValidateProfileName(s); err != nil {
+				return err
+			}
+			if cfg.ProfileFold(s) != nil {
+				return fmt.Errorf("a profile named %q already exists", s)
+			}
+			return nil
+		})
+		if err != nil {
+			return config.Profile{}, false, err
+		}
+	}
+	if h.IdentityFile == "" {
+		c.ui.Warn("No IdentityFile set for %q — SSH key will be empty.", h.Pattern)
+	}
+	p := config.Profile{Name: name, Username: h.User, SSHKey: h.IdentityFile}
+	if config.ValidateKeyPath(p.SSHKey) != nil { // e.g. a relative IdentityFile
+		c.ui.Warn("IdentityFile %q isn't an absolute or ~/ path; leaving SSH key empty.", p.SSHKey)
+		p.SSHKey = ""
+	}
+	if config.ValidateUsername(p.Username) != nil {
+		p.Username = ""
+	}
+	c.ui.Printf("%s\n", c.ui.S.Title.Render("Importing "+h.Pattern))
+	if p.GitName, err = c.ui.Input("Git name", lastName, config.ValidateGitName); err != nil {
+		return config.Profile{}, false, err
+	}
+	if p.GitEmail, err = c.ui.Input("Git email", "", config.ValidateEmail); err != nil {
+		return config.Profile{}, false, err
+	}
+	if _, err := c.env.Mutate(func(cfg *config.Config) error { return cfg.AddProfile(p) }); err != nil {
+		return config.Profile{}, false, err
+	}
+	return p, true, nil
 }
 
-// tildify replaces the home directory prefix with ~.
-// Falls back to returning path unchanged if the home directory cannot be
-// determined — this is acceptable because tildify is display-only.
-func tildify(path string) string {
-	home, err := homeDir()
-	if err != nil || home == "" {
-		return path
+// pickSSHConfig lets the user choose a known SSH config path or type one.
+func (c *cli) pickSSHConfig() (string, error) {
+	paths, err := sshconfig.DefaultConfigPaths()
+	if err != nil {
+		return "", err
 	}
-	if strings.HasPrefix(path, home+string(filepath.Separator)) {
-		return "~" + path[len(home):]
+	var items []ui.Item
+	for _, p := range paths {
+		status := "not found"
+		if _, err := os.Stat(p); err == nil {
+			status = "found"
+		}
+		items = append(items, ui.Item{Label: c.env.Display(p), Detail: status})
 	}
-	if path == home {
-		return "~"
+	items = append(items, ui.Item{Label: "Other…", Detail: "enter a path"})
+	i, err := c.ui.Select("SSH config to import from", items)
+	if err != nil {
+		return "", err
 	}
-	return path
-}
-
-// pluralSuffix returns singular if n==1, plural otherwise.
-func pluralSuffix(n int, singular, plural string) string {
-	if n == 1 {
-		return singular
+	if i < len(paths) {
+		return paths[i], nil
 	}
-	return plural
+	return c.ui.Input("SSH config path", "", func(s string) error {
+		if s == "" {
+			return errors.New("a path is required")
+		}
+		return nil
+	})
 }
